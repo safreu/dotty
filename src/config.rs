@@ -30,7 +30,7 @@ impl ConfigRoot {
     }
 
     pub fn write(&self) -> Result<(), ConfigFileError> {
-        toml_handler::write_toml(self, self.config().config_dir.to_path_buf())
+        toml_handler::write_toml(self, self.config().config_file())
             .map_err(ConfigFileError::Write)
     }
 
@@ -65,6 +65,10 @@ impl Config {
 
     pub fn config_dir(&self) -> &PathBuf {
         &self.config_dir
+    }
+
+    pub fn config_file(&self) -> PathBuf {
+        self.config_dir.join("config.toml")
     }
 
     pub fn storage_dir(&self) -> &PathBuf {

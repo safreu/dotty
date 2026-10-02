@@ -42,7 +42,7 @@ pub fn link_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), Lin
         EntryKind::Dir,
     )?;
 
-    path_handler::copy_dir(&target, entry.backed_up_at()).map_err(|_| LinkError::Copy)?;
+    path_handler::copy_dir(&target, entry.backed_up_at())?;
 
     fs::rename(&target, entry.stored_at()).map_err(|_| LinkError::Move)?;
 
@@ -57,8 +57,6 @@ pub fn link_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), Lin
 
 #[derive(Debug, thiserror::Error)]
 pub enum LinkError {
-    #[error("Target file doesn't have a filename")]
-    FilenameRequired(PathBuf),
     #[error(transparent)]
     PathCreationFailed(#[from] PathError),
     #[error("Failed to create backup")]
