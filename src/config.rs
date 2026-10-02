@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +13,7 @@ use crate::handlers::{
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigRoot {
     config: Config,
-    manages: Vec<ManagedEntry>,
+    manages: HashSet<ManagedEntry>,
 }
 
 impl ConfigRoot {
@@ -21,7 +24,7 @@ impl ConfigRoot {
                 config_dir: paths.config_dir().to_path_buf(),
                 storage_dir: paths.storage_dir().to_path_buf(),
             },
-            manages: vec![],
+            manages: HashSet::new(),
         }
     }
 
@@ -30,16 +33,19 @@ impl ConfigRoot {
     }
 
     pub fn write(&self) -> Result<(), ConfigFileError> {
-        toml_handler::write_toml(self, self.config().config_file())
-            .map_err(ConfigFileError::Write)
+        toml_handler::write_toml(self, self.config().config_file()).map_err(ConfigFileError::Write)
     }
 
     pub fn config(&self) -> &Config {
         &self.config
     }
 
-    pub fn manages_mut(&mut self) -> &mut Vec<ManagedEntry> {
+    pub fn manages_mut(&mut self) -> &mut HashSet<ManagedEntry> {
         &mut self.manages
+    }
+
+    pub fn manages(&self) -> &HashSet<ManagedEntry> {
+        &self.manages
     }
 }
 
@@ -80,7 +86,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Eq, Hash, PartialEq, Clone)]
 pub struct ManagedEntry {
     filename: String,
     managed_filename: String,
@@ -150,7 +156,7 @@ pub enum ManagedEntryError {
     FilenameRequired(PathBuf),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Eq, Hash, PartialEq, Clone)]
 pub enum EntryKind {
     Dir,
     File,

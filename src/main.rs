@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::{init, manage};
+use crate::commands::{init, manage, unmanage};
 
 mod commands;
 mod config;
@@ -32,6 +32,11 @@ enum Commands {
         #[arg(long)]
         target: PathBuf,
     },
+
+    Unmanage {
+        #[arg(long)]
+        target: PathBuf,
+    },
 }
 
 fn main() {
@@ -46,5 +51,10 @@ fn main() {
             Ok(_) => println!("manage success"),
             Err(e) => println!("Failed with {}", e),
         },
+        Commands::Unmanage { target } => match unmanage::execute(target) {
+            Ok(_) => println!("unmanage success"),
+            Err(e) => println!("Failed with {}", e),
+        },
+        _ => todo!(),
     }
 }
