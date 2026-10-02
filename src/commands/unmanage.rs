@@ -9,7 +9,6 @@ use crate::{
     },
 };
 
-// TODO: Handle different filetypes
 pub fn execute(target: PathBuf) -> Result<(), ManageError> {
     let paths = StorageHandler::discover()?;
 
@@ -17,9 +16,9 @@ pub fn execute(target: PathBuf) -> Result<(), ManageError> {
         ConfigRoot::read(&paths).map_err(ManageError::ConfigurationReadingFailed)?;
 
     if target.is_dir() {
-        link_handler::link_dir(target, &mut config_file)?;
+        link_handler::unlink_dir(target, &mut config_file)?;
     } else if target.is_file() {
-        link_handler::link_file(target, &mut config_file)?;
+        link_handler::unlink_file(target, &mut config_file)?;
     } else {
         return Err(ManageError::UnknownFileType);
     }
