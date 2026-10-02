@@ -22,6 +22,7 @@ impl ConfigRoot {
             config: Config {
                 dotfiles_dir,
                 config_dir: paths.config_dir().to_path_buf(),
+                backups_dir: paths.backup_dir().to_path_buf(),
                 storage_dir: paths.storage_dir().to_path_buf(),
             },
             manages: HashSet::new(),
@@ -33,7 +34,7 @@ impl ConfigRoot {
     }
 
     pub fn write(&self) -> Result<(), ConfigFileError> {
-        toml_handler::write_toml(self, self.config().config_file()).map_err(ConfigFileError::Write)
+        toml_handler::write_toml(self, &self.config().config_file()).map_err(ConfigFileError::Write)
     }
 
     pub fn config(&self) -> &Config {
@@ -61,6 +62,7 @@ pub enum ConfigFileError {
 pub struct Config {
     config_dir: PathBuf,
     storage_dir: PathBuf,
+    backups_dir: PathBuf,
     dotfiles_dir: PathBuf,
 }
 
@@ -69,20 +71,12 @@ impl Config {
         &self.dotfiles_dir
     }
 
-    pub fn config_dir(&self) -> &PathBuf {
-        &self.config_dir
-    }
-
     pub fn config_file(&self) -> PathBuf {
         self.config_dir.join("config.toml")
     }
 
-    pub fn storage_dir(&self) -> &PathBuf {
-        &self.storage_dir
-    }
-
-    pub fn backup_dir(&self) -> PathBuf {
-        self.storage_dir.join("backup")
+    pub fn backups_dir(&self) -> &PathBuf {
+        &self.backups_dir
     }
 }
 
@@ -92,14 +86,12 @@ pub struct ManagedEntry {
     managed_filename: String,
     stored_at: PathBuf,
     points_to: PathBuf,
-    backed_up_at: PathBuf,
     kind: EntryKind,
 }
 
 impl ManagedEntry {
     pub fn new(
         target: &Path,
-        backup_dir: &Path,
         dotfiles_dir: &Path,
         kind: EntryKind,
     ) -> Result<Self, ManagedEntryError> {
@@ -111,8 +103,6 @@ impl ManagedEntry {
 
         let managed_filename = filename.strip_prefix(".").unwrap_or(&filename).to_owned();
 
-        let backed_up_at = backup_dir.join(format!("{managed_filename}.bak"));
-
         let stored_at = dotfiles_dir.join(&managed_filename);
 
         Ok(Self {
@@ -120,25 +110,12 @@ impl ManagedEntry {
             managed_filename,
             stored_at,
             points_to: target.to_path_buf(),
-            backed_up_at,
             kind,
         })
     }
 
-    pub fn filename(&self) -> &str {
-        &self.filename
-    }
-
     pub fn points_to(&self) -> &PathBuf {
         &self.points_to
-    }
-
-    pub fn backed_up_at(&self) -> &PathBuf {
-        &self.backed_up_at
-    }
-
-    pub fn kind(&self) -> &EntryKind {
-        &self.kind
     }
 
     pub fn managed_filename(&self) -> &str {

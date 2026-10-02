@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use crate::commands::{init, manage, unmanage};
 
+mod backups;
 mod commands;
 mod config;
 mod handlers;
@@ -55,6 +56,5 @@ fn main() {
             Ok(_) => println!("unmanage success"),
             Err(e) => println!("Failed with {}", e),
         },
-        _ => todo!(),
     }
 }
