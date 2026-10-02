@@ -42,6 +42,6 @@ pub enum PathError {
     FileCreation,
     #[error("Failed to create directory")]
     DirectoryCreation,
-    #[error("Failed to read directory")]
+    #[error("Failed while copying directory")]
     DirectoryCopy(#[from] Error),
 }

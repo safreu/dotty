@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::init;
+use crate::commands::{init, manage};
 
 mod commands;
 mod config;
@@ -28,7 +28,10 @@ enum Commands {
         dotfiles_dir_path: PathBuf,
     },
     // Dotty will manage itself, meaning after init, program will call dotty manage 'self'
-    Manage,
+    Manage {
+        #[arg(long)]
+        target: PathBuf,
+    },
 }
 
 fn main() {
@@ -39,6 +42,9 @@ fn main() {
             Ok(_) => println!("Init success"),
             Err(e) => println!("Failed with {}", e),
         },
-        _ => todo!(),
+        Commands::Manage { target } => match manage::execute(target) {
+            Ok(_) => println!("manage success"),
+            Err(e) => println!("Failed with {}", e),
+        },
     }
 }
