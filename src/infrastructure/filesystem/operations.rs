@@ -1,4 +1,4 @@
-use std::{fs, io::Error, path::Path};
+use std::{fs, path::Path};
 
 pub fn create_dir(dir: &Path) -> Result<(), FileSystemError> {
     if fs::create_dir_all(dir).is_err() {
@@ -44,6 +44,6 @@ pub enum FileSystemError {
     FileCreation,
     #[error("Failed to create directory")]
     DirectoryCreation,
-    #[error("Failed while copying directory")]
-    DirectoryCopy(#[from] Error),
+    #[error("Failed while performing filesystem operation")]
+    Io(#[from] std::io::Error),
 }

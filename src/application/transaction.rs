@@ -257,13 +257,7 @@ mod tests {
         }
 
         fn backup_entry(&self, target: &std::path::Path) -> BackupEntry {
-            BackupEntry::new(
-                target,
-                &self.paths.backup_dir(),
-                &EntryKind::File,
-                BackupKind::Link,
-            )
-            .unwrap()
+            BackupEntry::new(target, &EntryKind::File, BackupKind::Link)
         }
     }
 

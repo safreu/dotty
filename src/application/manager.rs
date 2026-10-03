@@ -3,11 +3,10 @@ use std::{collections::hash_map, fs, os::unix::fs::symlink, path::PathBuf};
 use crate::{
     application::{OperationError, OperationTransaction, TransactionCommitError},
     domain::{
-        BackupEntry, BackupEntryError, BackupKind, BackupRoot, ConfigRoot, EntryKind, ManagedEntry,
-        ManagedEntryError,
+        BackupEntry, BackupKind, BackupRoot, ConfigRoot, EntryKind, ManagedEntry, ManagedEntryError,
     },
     infrastructure::{
-        filesystem::{self, BackupError, FileSystemError, RollbackAction},
+        filesystem::{self, BackupStorage, FileSystemError, RollbackAction},
         persistence::{
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
@@ -21,8 +20,7 @@ pub struct DotfileManager {
     config_repository: ConfigRepository,
     backups: BackupRoot,
     backups_repository: BackupRepository,
-
-    backup_dir: PathBuf,
+    backup_storage: BackupStorage,
 }
 
 impl DotfileManager {
@@ -32,14 +30,14 @@ impl DotfileManager {
         config_repository: ConfigRepository,
         backups: BackupRoot,
         backups_repository: BackupRepository,
-        backup_dir: PathBuf,
+        backup_storage: BackupStorage,
     ) -> Self {
         Self {
             config,
             config_repository,
             backups,
             backups_repository,
-            backup_dir,
+            backup_storage,
         }
     }
 
@@ -51,12 +49,14 @@ impl DotfileManager {
 
         let backups = backups_repository.read()?;
 
+        let backup_storage = BackupStorage::new(paths.backup_dir());
+
         Ok(Self {
             config,
             config_repository,
             backups,
             backups_repository,
-            backup_dir: paths.backup_dir(),
+            backup_storage,
         })
     }
 
@@ -67,8 +67,6 @@ impl DotfileManager {
     ) -> Result<(), OperationError<DotfileManagerError>> {
         filesystem::create_dir(self.config.config().dotfiles_dir())
             .map_err(DotfileManagerError::from)?;
-
-        let backups_dir = self.backup_dir.clone();
 
         let mut transaction = OperationTransaction::new(
             &mut self.config,
@@ -86,29 +84,25 @@ impl DotfileManager {
 
         let managed_entry = transaction.handle(result)?;
 
-        let new_backup_entry =
-            BackupEntry::new(&target, &backups_dir, &entry_kind, BackupKind::Link)
-                .map_err(DotfileManagerError::from);
+        let new_backup_entry = BackupEntry::new(&target, &entry_kind, BackupKind::Link);
 
-        let new_backup_entry = transaction.handle(new_backup_entry)?;
-
-        let backup_result = {
-            let backup_entry = match transaction
-                .backups_mut()
-                .backups_mut()
-                .entry(target.clone())
-            {
-                hash_map::Entry::Occupied(entry) => {
-                    let entry = entry.into_mut();
-                    entry.backups_mut().insert(BackupKind::Link);
-                    entry
-                }
-                hash_map::Entry::Vacant(entry) => entry.insert(new_backup_entry),
-            };
-
-            filesystem::backup(&managed_entry, backup_entry, BackupKind::Link)
-                .map_err(DotfileManagerError::Backup)
+        match transaction
+            .backups_mut()
+            .backups_mut()
+            .entry(target.clone())
+        {
+            hash_map::Entry::Occupied(entry) => {
+                entry.into_mut().backups_mut().insert(BackupKind::Link);
+            }
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(new_backup_entry);
+            }
         };
+
+        let backup_result = self
+            .backup_storage
+            .backup(&managed_entry, BackupKind::Link)
+            .map_err(DotfileManagerError::from);
 
         transaction.handle(backup_result)?;
 
@@ -172,13 +166,18 @@ impl DotfileManager {
                 Some(backup_entry) => {
                     backup_entry.backups_mut().insert(BackupKind::Unlink);
 
-                    filesystem::backup(&managed_entry, backup_entry, BackupKind::Unlink)
-                        .map_err(DotfileManagerError::Backup)
+                    Ok(())
                 }
-
                 None => Err(DotfileManagerError::Unmanaged(target.clone())),
             }
         };
+
+        transaction.handle(backup_result)?;
+
+        let backup_result = self
+            .backup_storage
+            .backup(&managed_entry, BackupKind::Unlink)
+            .map_err(DotfileManagerError::from);
 
         transaction.handle(backup_result)?;
 
@@ -218,10 +217,6 @@ impl DotfileManager {
 pub enum DotfileManagerError {
     #[error(transparent)]
     PathCreation(#[from] FileSystemError),
-    #[error(transparent)]
-    BackupEntryCreation(#[from] BackupEntryError),
-    #[error(transparent)]
-    Backup(#[from] BackupError),
     #[error("Failed to move target")]
     Move,
     #[error("Failed to symlink target")]
@@ -300,7 +295,7 @@ mod tests {
                 config_repository,
                 backups,
                 backup_repository,
-                self.paths.backup_dir(),
+                BackupStorage::new(self.paths.backup_dir()),
             )
         }
 
