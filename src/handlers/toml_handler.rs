@@ -14,7 +14,7 @@ where
     Ok(value)
 }
 
-pub fn write_toml<T>(to_write: &T, path: PathBuf) -> Result<(), TomlError>
+pub fn write_toml<T>(to_write: &T, path: &PathBuf) -> Result<(), TomlError>
 where
     T: Serialize,
 {

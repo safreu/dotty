@@ -49,4 +49,12 @@ impl StorageHandler {
     pub fn storage_dir(&self) -> &PathBuf {
         &self.storage_dir
     }
+
+    pub fn backup_dir(&self) -> PathBuf {
+        self.storage_dir.join("backups")
+    }
+
+    pub fn backup_file(&self) -> PathBuf {
+        self.storage_dir.join("backups.toml")
+    }
 }

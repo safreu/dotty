@@ -9,7 +9,7 @@ pub fn create_dir(dir: &PathBuf) -> Result<(), PathError> {
     Ok(())
 }
 
-pub fn create_file(path: PathBuf, content: String) -> Result<(), PathError> {
+pub fn create_file(path: &PathBuf, content: String) -> Result<(), PathError> {
     if fs::write(path, content).is_err() {
         return Err(FileCreation);
     }
@@ -19,6 +19,10 @@ pub fn create_file(path: PathBuf, content: String) -> Result<(), PathError> {
 // TODO: Rework the filetype distinction, and handle them correctly
 pub fn copy_dir(source: &PathBuf, destination: &PathBuf) -> Result<(), PathError> {
     create_dir(destination)?;
+
+    if destination.exists() {
+        fs::remove_dir_all(destination)?;
+    }
 
     for entry in fs::read_dir(source)? {
         let entry = entry?;

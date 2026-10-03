@@ -1,23 +1,50 @@
-use std::{fs, os::unix::fs::symlink, path::PathBuf};
+use std::{collections::hash_map, fs, os::unix::fs::symlink, path::PathBuf};
 
 use crate::{
+    backups::{BackupEntry, BackupEntryError, BackupFileError, BackupKind, BackupRoot},
     config::{ConfigFileError, ConfigRoot, EntryKind, ManagedEntry, ManagedEntryError},
-    handlers::path_handler::{self, PathError},
+    handlers::{
+        backup_handler::{self, BackupError},
+        path_handler::{self, PathError},
+    },
 };
 
 // Creates a backup, moves it to dotfiles_dir, writes data into config about the managed file, and symlinks it
-pub fn link_file(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), LinkError> {
-    path_handler::create_dir(&config_file.config().backup_dir())?;
+pub fn link_file(
+    target: PathBuf,
+    config_file: &mut ConfigRoot,
+    backup_file: &mut BackupRoot,
+) -> Result<(), LinkError> {
     path_handler::create_dir(config_file.config().dotfiles_dir())?;
 
     let entry = ManagedEntry::new(
         &target,
-        &config_file.config().backup_dir(),
         config_file.config().dotfiles_dir(),
         EntryKind::File,
     )?;
 
-    fs::copy(&target, entry.backed_up_at()).map_err(|_| LinkError::Copy)?;
+    let backup_entry = match backup_file.backups_mut().entry(target.clone()) {
+        hash_map::Entry::Occupied(entry) => {
+            let entry = entry.into_mut();
+
+            entry.backups_mut().insert(BackupKind::Link);
+
+            entry
+        }
+        hash_map::Entry::Vacant(entry) => {
+            let backup_entry = BackupEntry::new(
+                &target,
+                config_file.config().backups_dir(),
+                EntryKind::File,
+                BackupKind::Link,
+            )?;
+
+            entry.insert(backup_entry)
+        }
+    };
+
+    backup_handler::backup_file(&entry, backup_entry, BackupKind::Link)
+        .map_err(LinkError::Backup)?;
 
     fs::rename(&target, entry.stored_at()).map_err(|_| LinkError::Move)?;
 
@@ -26,12 +53,16 @@ pub fn link_file(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), Li
     config_file.manages_mut().insert(entry);
 
     config_file.write()?;
+    backup_file.write()?;
 
     Ok(())
 }
 
-pub fn unlink_file(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), LinkError> {
-    path_handler::create_dir(&config_file.config().backup_dir())?;
+pub fn unlink_file(
+    target: PathBuf,
+    config_file: &mut ConfigRoot,
+    backup_file: &mut BackupRoot,
+) -> Result<(), LinkError> {
     path_handler::create_dir(config_file.config().dotfiles_dir())?;
 
     if !target.is_symlink() {
@@ -45,7 +76,15 @@ pub fn unlink_file(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), 
         .cloned()
         .ok_or_else(|| LinkError::Unmanaged(target.clone()))?;
 
-    fs::copy(entry.stored_at(), entry.backed_up_at()).map_err(|_| LinkError::Copy)?;
+    let backup_entry = backup_file
+        .backups_mut()
+        .get_mut(&target)
+        .ok_or_else(|| LinkError::Unmanaged(target.clone()))?;
+
+    backup_entry.backups_mut().insert(BackupKind::Unlink);
+
+    backup_handler::backup_file(&entry, backup_entry, BackupKind::Unlink)
+        .map_err(LinkError::Backup)?;
 
     fs::remove_file(&target).map_err(|_| LinkError::DeleteSymlink)?;
 
@@ -54,23 +93,43 @@ pub fn unlink_file(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), 
     config_file.manages_mut().remove(&entry);
 
     config_file.write()?;
+    backup_file.write()?;
 
     Ok(())
 }
 
 // Creates a backup, moves it to dotfiles_dir, writes data into config about the managed directory, and symlinks it
-pub fn link_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), LinkError> {
-    path_handler::create_dir(&config_file.config().backup_dir())?;
+pub fn link_dir(
+    target: PathBuf,
+    config_file: &mut ConfigRoot,
+    backup_file: &mut BackupRoot,
+) -> Result<(), LinkError> {
     path_handler::create_dir(config_file.config().dotfiles_dir())?;
 
-    let entry = ManagedEntry::new(
-        &target,
-        &config_file.config().backup_dir(),
-        config_file.config().dotfiles_dir(),
-        EntryKind::Dir,
-    )?;
+    let entry = ManagedEntry::new(&target, config_file.config().dotfiles_dir(), EntryKind::Dir)?;
 
-    path_handler::copy_dir(&target, entry.backed_up_at())?;
+    let backup_entry = match backup_file.backups_mut().entry(target.clone()) {
+        hash_map::Entry::Occupied(entry) => {
+            let entry = entry.into_mut();
+
+            entry.backups_mut().insert(BackupKind::Link);
+
+            entry
+        }
+        hash_map::Entry::Vacant(entry) => {
+            let backup_entry = BackupEntry::new(
+                &target,
+                config_file.config().backups_dir(),
+                EntryKind::Dir,
+                BackupKind::Link,
+            )?;
+
+            entry.insert(backup_entry)
+        }
+    };
+
+    backup_handler::backup_dir(&entry, backup_entry, BackupKind::Link)
+        .map_err(LinkError::Backup)?;
 
     fs::rename(&target, entry.stored_at()).map_err(|_| LinkError::Move)?;
 
@@ -79,12 +138,16 @@ pub fn link_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), Lin
     config_file.manages_mut().insert(entry);
 
     config_file.write()?;
+    backup_file.write()?;
 
     Ok(())
 }
 
-pub fn unlink_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), LinkError> {
-    path_handler::create_dir(&config_file.config().backup_dir())?;
+pub fn unlink_dir(
+    target: PathBuf,
+    config_file: &mut ConfigRoot,
+    backup_file: &mut BackupRoot,
+) -> Result<(), LinkError> {
     path_handler::create_dir(config_file.config().dotfiles_dir())?;
 
     if !target.is_symlink() {
@@ -98,7 +161,15 @@ pub fn unlink_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), L
         .cloned()
         .ok_or_else(|| LinkError::Unmanaged(target.clone()))?;
 
-    path_handler::copy_dir(entry.stored_at(), entry.backed_up_at()).map_err(|_| LinkError::Copy)?;
+    let backup_entry = backup_file
+        .backups_mut()
+        .get_mut(&target)
+        .ok_or_else(|| LinkError::Unmanaged(target.clone()))?;
+
+    backup_entry.backups_mut().insert(BackupKind::Unlink);
+
+    backup_handler::backup_dir(&entry, backup_entry, BackupKind::Unlink)
+        .map_err(LinkError::Backup)?;
 
     fs::remove_file(&target).map_err(|_| LinkError::DeleteSymlink)?;
 
@@ -107,6 +178,7 @@ pub fn unlink_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), L
     config_file.manages_mut().remove(&entry);
 
     config_file.write()?;
+    backup_file.write()?;
 
     Ok(())
 }
@@ -114,9 +186,11 @@ pub fn unlink_dir(target: PathBuf, config_file: &mut ConfigRoot) -> Result<(), L
 #[derive(Debug, thiserror::Error)]
 pub enum LinkError {
     #[error(transparent)]
-    PathCreationFailed(#[from] PathError),
-    #[error("Failed to create backup")]
-    Copy,
+    PathCreation(#[from] PathError),
+    #[error(transparent)]
+    BackupEntryCreation(#[from] BackupEntryError),
+    #[error(transparent)]
+    Backup(#[from] BackupError),
     #[error("Failed to move target")]
     Move,
     #[error("Failed to symlink target")]
@@ -126,7 +200,9 @@ pub enum LinkError {
     #[error("This target is unmanaged already")]
     Unmanaged(PathBuf),
     #[error(transparent)]
-    EntryCreationFailed(#[from] ManagedEntryError),
+    EntryCreation(#[from] ManagedEntryError),
     #[error(transparent)]
-    ConfigWriteFailed(#[from] ConfigFileError),
+    ConfigWrite(#[from] ConfigFileError),
+    #[error(transparent)]
+    BackupWrite(#[from] BackupFileError),
 }

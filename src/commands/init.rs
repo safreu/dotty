@@ -1,6 +1,7 @@
 use std::{env, path::PathBuf};
 
 use crate::{
+    backups::{BackupFileError, BackupRoot},
     config::{ConfigFileError, ConfigRoot},
     handlers::{
         path_handler::{self, PathError},
@@ -26,7 +27,11 @@ pub fn execute(path: PathBuf) -> Result<(), InitError> {
 
     let config_file = ConfigRoot::new(path, &paths);
 
+    path_handler::create_dir(&paths.backup_dir())?;
+    let backup_file = BackupRoot::new(paths.backup_file());
+
     config_file.write()?;
+    backup_file.write()?;
 
     path_handler::create_dir(config_file.config().dotfiles_dir())?;
 
@@ -39,6 +44,8 @@ pub enum InitError {
     MissingEnvVariable(#[from] env::VarError),
     #[error(transparent)]
     ConfigurationWritingFailed(#[from] ConfigFileError),
+    #[error(transparent)]
+    BackupWritingFailed(#[from] BackupFileError),
     #[error("Dotty is already initialized")]
     AlreadyInit,
     #[error(transparent)]
