@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::{init, manage, unmanage};
+use crate::commands::{forget, init, manage};
 
 mod backups;
 mod commands;
@@ -34,7 +34,7 @@ enum Commands {
         target: PathBuf,
     },
 
-    Unmanage {
+    Forget {
         #[arg(long)]
         target: PathBuf,
     },
@@ -52,8 +52,8 @@ fn main() {
             Ok(_) => println!("manage success"),
             Err(e) => println!("Failed with {}", e),
         },
-        Commands::Unmanage { target } => match unmanage::execute(target) {
-            Ok(_) => println!("unmanage success"),
+        Commands::Forget { target } => match forget::execute(target) {
+            Ok(_) => println!("forget success"),
             Err(e) => println!("Failed with {}", e),
         },
     }

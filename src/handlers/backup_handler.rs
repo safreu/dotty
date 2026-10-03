@@ -24,7 +24,8 @@ pub fn backup_file(
     };
 
     let name = format!("{}.bak.{suffix}", entry.managed_filename());
-    fs::copy(source, backup_entry.backup_dir().join(name)).map_err(|_| BackupError::Copy)?;
+
+    fs::copy(source, backup_entry.backup_dir().join(name)).map_err(BackupError::FileCopy)?;
 
     Ok(())
 }
@@ -48,7 +49,7 @@ pub fn backup_dir(
 
     let name = format!("{}.bak.{suffix}", entry.managed_filename());
     path_handler::copy_dir(source, &backup_entry.backup_dir().join(name))
-        .map_err(|_| BackupError::Copy)?;
+        .map_err(BackupError::PathCreationFailed)?;
 
     Ok(())
 }
@@ -58,5 +59,5 @@ pub enum BackupError {
     #[error(transparent)]
     PathCreationFailed(#[from] PathError),
     #[error("Failed to create backup")]
-    Copy,
+    FileCopy(#[source] std::io::Error),
 }

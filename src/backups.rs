@@ -20,8 +20,15 @@ pub struct BackupRoot {
 }
 
 impl BackupRoot {
+    pub fn new(backup_file: PathBuf) -> Self {
+        Self {
+            config: BackupConfig { backup_file },
+            backups: HashMap::new(),
+        }
+    }
+
     pub fn read(paths: &StorageHandler) -> Result<Self, BackupFileError> {
-        toml_handler::read_toml(paths.backup_dir()).map_err(BackupFileError::Read)
+        toml_handler::read_toml(paths.backup_file()).map_err(BackupFileError::Read)
     }
 
     pub fn write(&self) -> Result<(), BackupFileError> {

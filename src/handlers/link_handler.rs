@@ -4,7 +4,7 @@ use crate::{
     backups::{BackupEntry, BackupEntryError, BackupFileError, BackupKind, BackupRoot},
     config::{ConfigFileError, ConfigRoot, EntryKind, ManagedEntry, ManagedEntryError},
     handlers::{
-        backup_handler,
+        backup_handler::{self, BackupError},
         path_handler::{self, PathError},
     },
 };
@@ -44,7 +44,7 @@ pub fn link_file(
     };
 
     backup_handler::backup_file(&entry, backup_entry, BackupKind::Link)
-        .map_err(|_| LinkError::Backup)?;
+        .map_err(LinkError::Backup)?;
 
     fs::rename(&target, entry.stored_at()).map_err(|_| LinkError::Move)?;
 
@@ -84,7 +84,7 @@ pub fn unlink_file(
     backup_entry.backups_mut().insert(BackupKind::Unlink);
 
     backup_handler::backup_file(&entry, backup_entry, BackupKind::Unlink)
-        .map_err(|_| LinkError::Backup)?;
+        .map_err(LinkError::Backup)?;
 
     fs::remove_file(&target).map_err(|_| LinkError::DeleteSymlink)?;
 
@@ -129,7 +129,7 @@ pub fn link_dir(
     };
 
     backup_handler::backup_dir(&entry, backup_entry, BackupKind::Link)
-        .map_err(|_| LinkError::Backup)?;
+        .map_err(LinkError::Backup)?;
 
     fs::rename(&target, entry.stored_at()).map_err(|_| LinkError::Move)?;
 
@@ -169,7 +169,7 @@ pub fn unlink_dir(
     backup_entry.backups_mut().insert(BackupKind::Unlink);
 
     backup_handler::backup_dir(&entry, backup_entry, BackupKind::Unlink)
-        .map_err(|_| LinkError::Backup)?;
+        .map_err(LinkError::Backup)?;
 
     fs::remove_file(&target).map_err(|_| LinkError::DeleteSymlink)?;
 
@@ -189,8 +189,8 @@ pub enum LinkError {
     PathCreation(#[from] PathError),
     #[error(transparent)]
     BackupEntryCreation(#[from] BackupEntryError),
-    #[error("Failed to create a backup")]
-    Backup,
+    #[error(transparent)]
+    Backup(#[from] BackupError),
     #[error("Failed to move target")]
     Move,
     #[error("Failed to symlink target")]
