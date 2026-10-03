@@ -5,52 +5,28 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    config::EntryKind,
-    handlers::{
-        storage_handler::StorageHandler,
-        toml_handler::{self, TomlError},
-    },
-};
+use crate::domain::EntryKind;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupRoot {
-    config: BackupConfig,
     backups: HashMap<PathBuf, BackupEntry>,
 }
 
 impl BackupRoot {
-    pub fn new(backup_file: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
-            config: BackupConfig { backup_file },
             backups: HashMap::new(),
         }
-    }
-
-    pub fn read(paths: &StorageHandler) -> Result<Self, BackupFileError> {
-        toml_handler::read_toml(paths.backup_file()).map_err(BackupFileError::Read)
-    }
-
-    pub fn write(&self) -> Result<(), BackupFileError> {
-        toml_handler::write_toml(self, &self.config.backup_file).map_err(BackupFileError::Write)
     }
 
     pub fn backups_mut(&mut self) -> &mut HashMap<PathBuf, BackupEntry> {
         &mut self.backups
     }
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BackupConfig {
-    backup_file: PathBuf,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BackupFileError {
-    #[error("Failed to read backups.toml")]
-    Read(#[source] TomlError),
-    #[error("Failed to persist backups.toml")]
-    Write(#[source] TomlError),
+    #[allow(unused)]
+    pub fn backups(&self) -> &HashMap<PathBuf, BackupEntry> {
+        &self.backups
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
@@ -69,7 +45,7 @@ impl BackupEntry {
     pub fn new(
         target: &Path,
         backup_dir: &Path,
-        entry_kind: EntryKind,
+        entry_kind: &EntryKind,
         backup_kind: BackupKind,
     ) -> Result<Self, BackupEntryError> {
         let filename = target
@@ -87,13 +63,18 @@ impl BackupEntry {
         Ok(Self {
             original_path: target.to_path_buf(),
             backup_dir: stored_dir,
-            kind: entry_kind,
+            kind: entry_kind.clone(),
             backups,
         })
     }
 
     pub fn backups_mut(&mut self) -> &mut HashSet<BackupKind> {
         &mut self.backups
+    }
+
+    #[allow(unused)]
+    pub fn backups(&self) -> &HashSet<BackupKind> {
+        &self.backups
     }
 }
 

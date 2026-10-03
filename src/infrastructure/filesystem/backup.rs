@@ -1,17 +1,27 @@
 use std::fs;
 
 use crate::{
-    backups::{BackupEntry, BackupKind},
-    config::ManagedEntry,
-    handlers::path_handler::{self, PathError},
+    domain::{BackupEntry, BackupKind, EntryKind, ManagedEntry},
+    infrastructure::filesystem::{self, FileSystemError},
 };
 
-pub fn backup_file(
+pub fn backup(
     entry: &ManagedEntry,
     backup_entry: &BackupEntry,
     backup_kind: BackupKind,
 ) -> Result<(), BackupError> {
-    path_handler::create_dir(backup_entry.backup_dir())?;
+    match entry.kind() {
+        EntryKind::Dir => backup_dir(entry, backup_entry, backup_kind),
+        EntryKind::File => backup_file(entry, backup_entry, backup_kind),
+    }
+}
+
+fn backup_file(
+    entry: &ManagedEntry,
+    backup_entry: &BackupEntry,
+    backup_kind: BackupKind,
+) -> Result<(), BackupError> {
+    filesystem::create_dir(backup_entry.backup_dir())?;
 
     let suffix = match backup_kind {
         BackupKind::Link => "link",
@@ -30,12 +40,12 @@ pub fn backup_file(
     Ok(())
 }
 
-pub fn backup_dir(
+fn backup_dir(
     entry: &ManagedEntry,
     backup_entry: &BackupEntry,
     backup_kind: BackupKind,
 ) -> Result<(), BackupError> {
-    path_handler::create_dir(backup_entry.backup_dir())?;
+    filesystem::create_dir(backup_entry.backup_dir())?;
 
     let suffix = match backup_kind {
         BackupKind::Link => "link",
@@ -48,7 +58,7 @@ pub fn backup_dir(
     };
 
     let name = format!("{}.bak.{suffix}", entry.managed_filename());
-    path_handler::copy_dir(source, &backup_entry.backup_dir().join(name))
+    filesystem::copy_dir(source, &backup_entry.backup_dir().join(name))
         .map_err(BackupError::PathCreationFailed)?;
 
     Ok(())
@@ -57,7 +67,7 @@ pub fn backup_dir(
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
     #[error(transparent)]
-    PathCreationFailed(#[from] PathError),
+    PathCreationFailed(#[from] FileSystemError),
     #[error("Failed to create backup")]
     FileCopy(#[source] std::io::Error),
 }

@@ -1,28 +1,26 @@
-use std::{fs, io::Error, path::PathBuf};
+use std::{fs, io::Error, path::Path};
 
-use crate::handlers::path_handler::PathError::{DirectoryCreation, FileCreation};
-
-pub fn create_dir(dir: &PathBuf) -> Result<(), PathError> {
+pub fn create_dir(dir: &Path) -> Result<(), FileSystemError> {
     if fs::create_dir_all(dir).is_err() {
-        return Err(DirectoryCreation);
+        return Err(FileSystemError::DirectoryCreation);
     }
     Ok(())
 }
 
-pub fn create_file(path: &PathBuf, content: String) -> Result<(), PathError> {
+pub fn create_file(path: &Path, content: String) -> Result<(), FileSystemError> {
     if fs::write(path, content).is_err() {
-        return Err(FileCreation);
+        return Err(FileSystemError::FileCreation);
     }
     Ok(())
 }
 
 // TODO: Rework the filetype distinction, and handle them correctly
-pub fn copy_dir(source: &PathBuf, destination: &PathBuf) -> Result<(), PathError> {
-    create_dir(destination)?;
-
+pub fn copy_dir(source: &Path, destination: &Path) -> Result<(), FileSystemError> {
     if destination.exists() {
         fs::remove_dir_all(destination)?;
     }
+
+    create_dir(destination)?;
 
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -41,7 +39,7 @@ pub fn copy_dir(source: &PathBuf, destination: &PathBuf) -> Result<(), PathError
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PathError {
+pub enum FileSystemError {
     #[error("Failed to create file")]
     FileCreation,
     #[error("Failed to create directory")]

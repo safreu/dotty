@@ -4,10 +4,10 @@ use clap::{Parser, Subcommand};
 
 use crate::commands::{forget, init, manage};
 
-mod backups;
+mod application;
 mod commands;
-mod config;
-mod handlers;
+mod domain;
+mod infrastructure;
 
 #[derive(Parser)]
 #[command(name = "dotty", about = "Dotfile management tool")]

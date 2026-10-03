@@ -1,44 +1,33 @@
 use std::path::PathBuf;
 
 use crate::{
-    backups::{BackupFileError, BackupRoot},
-    commands::init::InitError,
-    config::{ConfigFileError, ConfigRoot},
-    handlers::{
-        link_handler::{self, LinkError},
-        storage_handler::StorageHandler,
-    },
+    application::{DotfileManager, DotfileManagerError, DotfileManagerLoadError, OperationError},
+    infrastructure::persistence::paths::{DottyPaths, DottyPathsError},
 };
 
-pub fn execute(target: PathBuf) -> Result<(), ManageError> {
-    let paths = StorageHandler::discover()?;
+pub fn execute(target: PathBuf) -> Result<(), ForgetError> {
+    let paths = DottyPaths::discover()?;
 
-    let mut config_file =
-        ConfigRoot::read(&paths).map_err(ManageError::ConfigurationReadingFailed)?;
+    let mut manager = DotfileManager::load(&paths)?;
 
-    let mut backup_file = BackupRoot::read(&paths).map_err(ManageError::BackupReadingFailed)?;
-
-    if target.is_dir() {
-        link_handler::unlink_dir(target, &mut config_file, &mut backup_file)?;
-    } else if target.is_file() {
-        link_handler::unlink_file(target, &mut config_file, &mut backup_file)?;
+    if target.is_dir() || target.is_file() {
+        manager.forget(target)?;
     } else {
-        return Err(ManageError::UnknownFileType);
+        return Err(ForgetError::UnknownFileType);
     }
 
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ManageError {
+pub enum ForgetError {
     #[error("The filetype is not supported")]
     UnknownFileType,
-    #[error("Configuration File couldn't be read")]
-    ConfigurationReadingFailed(#[source] ConfigFileError),
-    #[error("Backup File couldn't be read")]
-    BackupReadingFailed(#[source] BackupFileError),
+
     #[error(transparent)]
-    PathDiscovery(#[from] InitError),
+    PathDiscovery(#[from] DottyPathsError),
     #[error(transparent)]
-    Linking(#[from] LinkError),
+    ManagerLoad(#[from] DotfileManagerLoadError),
+    #[error(transparent)]
+    Operation(#[from] OperationError<DotfileManagerError>),
 }

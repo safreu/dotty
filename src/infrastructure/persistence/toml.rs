@@ -1,9 +1,9 @@
 use serde::{Serialize, de::DeserializeOwned};
-use std::{fs, path::PathBuf};
+use std::{fs, path::Path};
 
-use crate::handlers::path_handler::{self, PathError};
+use crate::infrastructure::filesystem::{self, FileSystemError};
 
-pub fn read_toml<T>(path: PathBuf) -> Result<T, TomlError>
+pub fn read_toml<T>(path: &Path) -> Result<T, TomlError>
 where
     T: DeserializeOwned,
 {
@@ -14,13 +14,13 @@ where
     Ok(value)
 }
 
-pub fn write_toml<T>(to_write: &T, path: &PathBuf) -> Result<(), TomlError>
+pub fn write_toml<T>(to_write: &T, path: &Path) -> Result<(), TomlError>
 where
     T: Serialize,
 {
     let content = toml::to_string_pretty(to_write).map_err(|_| TomlError::Write)?;
 
-    path_handler::create_file(path, content)?;
+    filesystem::create_file(path, content)?;
 
     Ok(())
 }
@@ -32,5 +32,5 @@ pub enum TomlError {
     #[error("Failed to write toml")]
     Write,
     #[error(transparent)]
-    PathCreationFailed(#[from] PathError),
+    PathCreationFailed(#[from] FileSystemError),
 }
