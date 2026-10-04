@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::{
     domain::{BackupRoot, ConfigRoot},
     infrastructure::{
-        filesystem::{self, FileSystemError},
+        filesystem::{DottyLayout, DottyLayoutError, FileSystemError},
         persistence::{
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
@@ -12,17 +12,18 @@ use crate::{
     },
 };
 
-pub fn execute(path: PathBuf) -> Result<(), InitError> {
+pub fn execute(repo_dir: PathBuf) -> Result<(), InitError> {
     let paths = DottyPaths::discover()?;
 
-    if paths.config_dir().exists() {
+    let layout = DottyLayout::new(&paths);
+
+    if layout.is_initialized() {
         return Err(InitError::AlreadyInit);
     }
 
-    filesystem::create_dir(paths.config_dir())?;
-    filesystem::create_dir(&paths.backup_dir())?;
+    layout.initialize(&repo_dir)?;
 
-    let config = ConfigRoot::new(path);
+    let config = ConfigRoot::new(repo_dir);
     let backups = BackupRoot::new();
 
     let config_repository = ConfigRepository::new(paths.config_file());
@@ -30,8 +31,6 @@ pub fn execute(path: PathBuf) -> Result<(), InitError> {
 
     config_repository.write(&config)?;
     backups_repository.write(&backups)?;
-
-    filesystem::create_dir(config.config().dotfiles_dir())?;
 
     Ok(())
 }
@@ -49,4 +48,6 @@ pub enum InitError {
 
     #[error(transparent)]
     PathDiscovery(#[from] DottyPathsError),
+    #[error(transparent)]
+    Layout(#[from] DottyLayoutError),
 }
