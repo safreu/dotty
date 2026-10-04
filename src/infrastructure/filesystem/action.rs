@@ -1,4 +1,4 @@
-use std::{fs, os::unix::fs::symlink, path::PathBuf};
+use std::path::PathBuf;
 
 use crate::infrastructure::filesystem::{self, FileSystemError};
 
@@ -56,19 +56,19 @@ impl FileSystemAction {
                 )))
             }
             FileSystemAction::RemoveDirectory(path) => {
-                fs::remove_dir(path)?;
+                filesystem::remove_dir(&path)?;
 
                 Ok(ExecutedFileSystemAction::new(None))
             }
 
             FileSystemAction::WriteFile { path, contents } => {
                 let previous = if path.exists() {
-                    Some(fs::read(&path)?)
+                    Some(filesystem::read_file(&path)?)
                 } else {
                     None
                 };
 
-                fs::write(&path, contents)?;
+                filesystem::write_file(&path, &contents)?;
 
                 let rollback = match previous {
                     Some(contents) => FileSystemAction::WriteFile { path, contents },
@@ -78,13 +78,13 @@ impl FileSystemAction {
                 Ok(ExecutedFileSystemAction::new(Some(rollback)))
             }
             FileSystemAction::RemoveFile(path) => {
-                fs::remove_file(path)?;
+                filesystem::remove_file(&path)?;
 
                 Ok(ExecutedFileSystemAction::new(None))
             }
 
             FileSystemAction::Rename { from, to } => {
-                fs::rename(&from, &to)?;
+                filesystem::rename(&from, &to)?;
 
                 Ok(ExecutedFileSystemAction::new(Some(
                     FileSystemAction::Rename { from: to, to: from },
@@ -92,16 +92,16 @@ impl FileSystemAction {
             }
 
             FileSystemAction::CreateSymlink { target, link } => {
-                symlink(&target, &link)?;
+                filesystem::create_symlink(&target, &link)?;
 
                 Ok(ExecutedFileSystemAction::new(Some(
                     FileSystemAction::RemoveSymlink(link),
                 )))
             }
             FileSystemAction::RemoveSymlink(link) => {
-                let target = fs::read_link(&link)?;
+                let target = filesystem::read_symlink(&link)?;
 
-                fs::remove_file(&link)?;
+                filesystem::remove_symlink(&link)?;
 
                 Ok(ExecutedFileSystemAction::new(Some(
                     FileSystemAction::CreateSymlink { target, link },
@@ -116,14 +116,14 @@ impl FileSystemAction {
                 )))
             }
             FileSystemAction::CopyFile { from, to } => {
-                fs::copy(&from, &to)?;
+                filesystem::copy_file(&from, &to)?;
 
                 Ok(ExecutedFileSystemAction::new(Some(
                     FileSystemAction::RemoveFile(to),
                 )))
             }
             FileSystemAction::RemoveDirectoryAll(path) => {
-                fs::remove_dir_all(path)?;
+                filesystem::remove_dir_all(&path)?;
 
                 Ok(ExecutedFileSystemAction::new(None))
             }

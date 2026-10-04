@@ -30,7 +30,7 @@ where
 {
     let content = toml::to_string_pretty(to_write).map_err(|_| TomlError::Write)?;
 
-    filesystem::create_file(path, content)?;
+    filesystem::write_file(path, &content.into_bytes())?;
 
     Ok(())
 }

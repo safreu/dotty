@@ -261,6 +261,8 @@ mod tests {
 
             let paths = DottyPaths::new(config_dir, storage_dir);
 
+            fs::create_dir_all(paths.backup_dir()).unwrap();
+
             Self {
                 temp,
                 paths,
@@ -547,17 +549,13 @@ mod tests {
 
         assert!(result.is_err());
 
-        // Filesystem state must be restored to the managed state.
         assert!(target.is_symlink());
         assert!(stored.exists());
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
 
-        // The unlink backup was created by the failed operation,
-        // so rollback must remove it.
         assert!(!ctx.unlink_backup("zshrc").exists());
 
-        // Persistent metadata must also remain in the managed state.
         let config = ctx.read_config();
 
         assert_eq!(config.manages().len(), 1);
