@@ -27,6 +27,3 @@ pub enum DottyLayoutError {
     #[error("Dotty is not initialized. Run `dotty init` first")]
     NotInitialized,
 }
-
-
-

@@ -6,7 +6,7 @@ use crate::{
         BackupEntry, BackupKind, BackupRoot, ConfigRoot, EntryKind, ManagedEntry, ManagedEntryError,
     },
     infrastructure::{
-        filesystem::{self, BackupStorage, FileSystemError, RollbackAction},
+        filesystem::{BackupStorage, FileSystemError, RollbackAction},
         persistence::{
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
@@ -65,9 +65,6 @@ impl DotfileManager {
         target: PathBuf,
         entry_kind: EntryKind,
     ) -> Result<(), OperationError<DotfileManagerError>> {
-        filesystem::create_dir(self.config.config().dotfiles_dir())
-            .map_err(DotfileManagerError::from)?;
-
         let mut transaction = OperationTransaction::new(
             &mut self.config,
             &self.config_repository,
@@ -135,9 +132,6 @@ impl DotfileManager {
     }
 
     pub fn forget(&mut self, target: PathBuf) -> Result<(), OperationError<DotfileManagerError>> {
-        filesystem::create_dir(self.config.config().dotfiles_dir())
-            .map_err(DotfileManagerError::from)?;
-
         if !target.is_symlink() {
             return Err(OperationError::Operation(DotfileManagerError::Unmanaged(
                 target.clone(),

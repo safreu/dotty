@@ -3,12 +3,18 @@ use std::path::PathBuf;
 use crate::{
     application::{DotfileManager, DotfileManagerError, DotfileManagerLoadError, OperationError},
     domain::EntryKind,
-    infrastructure::persistence::paths::{DottyPaths, DottyPathsError},
+    infrastructure::{
+        filesystem::{DottyLayout, DottyLayoutError},
+        persistence::paths::{DottyPaths, DottyPathsError},
+    },
 };
 
 // TODO: Handle different filetypes
 pub fn execute(target: PathBuf) -> Result<(), ManageError> {
     let paths = DottyPaths::discover()?;
+
+    let layout = DottyLayout::new(&paths);
+    layout.require_initialized()?;
 
     let mut manager = DotfileManager::load(&paths)?;
 
@@ -34,4 +40,6 @@ pub enum ManageError {
     ManagerLoad(#[from] DotfileManagerLoadError),
     #[error(transparent)]
     Operation(#[from] OperationError<DotfileManagerError>),
+    #[error(transparent)]
+    Layout(#[from] DottyLayoutError),
 }
