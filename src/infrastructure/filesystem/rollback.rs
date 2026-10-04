@@ -115,6 +115,16 @@ impl RollbackStack {
             Err(RollbackError { errors })
         }
     }
+
+    pub fn fail<E>(&mut self, operation: E) -> RollbackOperationError<E> {
+        match self.rollback() {
+            Ok(()) => RollbackOperationError::Operation(operation),
+            Err(rollback) => RollbackOperationError::Rollback {
+                operation,
+                rollback,
+            },
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,4 +181,72 @@ pub enum RollbackActionError {
         #[source]
         source_error: std::io::Error,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RollbackOperationError<E> {
+    #[error(transparent)]
+    Operation(E),
+    #[error("operation failed and rollback also failed")]
+    Rollback {
+        operation: E,
+        rollback: RollbackError,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn fail_returns_operation_error_when_rollback_succeeds() {
+        let temp = TempDir::new().unwrap();
+
+        let path = temp.path().join("created-file");
+        fs::write(&path, "hello").unwrap();
+
+        let mut rollback = RollbackStack::new();
+
+        rollback.register(RollbackAction::RemoveFile(path.clone()));
+
+        let error = rollback.fail("operation failed");
+
+        assert!(matches!(
+            error,
+            RollbackOperationError::Operation("operation failed")
+        ));
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn fail_returns_rollback_error_when_rollback_fails() {
+        let temp = TempDir::new().unwrap();
+
+        let missing = temp.path().join("does-not-exist");
+
+        let mut rollback = RollbackStack::new();
+
+        rollback.register(RollbackAction::RemoveFile(missing));
+
+        let error = rollback.fail("operation failed");
+
+        match error {
+            RollbackOperationError::Rollback {
+                operation,
+                rollback,
+            } => {
+                assert_eq!(operation, "operation failed");
+                assert!(!rollback.errors.is_empty());
+            }
+
+            RollbackOperationError::Operation(_) => {
+                panic!("expected rollback failure");
+            }
+        }
+    }
 }
