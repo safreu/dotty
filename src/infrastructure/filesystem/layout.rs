@@ -1,8 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::infrastructure::{
-    filesystem::{self, FileSystemError, RollbackStack},
-    persistence::paths::DottyPaths,
+use crate::{
+    application::Plan,
+    infrastructure::{
+        filesystem::{FileSystemAction, FileSystemError},
+        persistence::paths::DottyPaths,
+    },
 };
 
 pub struct DottyLayout<'a> {
@@ -26,55 +29,30 @@ impl<'a> DottyLayout<'a> {
         }
     }
 
-    pub fn initialize(
-        &self,
-        repo_dir: &Path,
-        rollback: &mut RollbackStack,
-    ) -> Result<(), DottyLayoutError> {
-        let plan = self.initialization_plan(repo_dir);
-
-        for action in plan {
-            match action {
-                LayoutAction::CreateDirectory(dir) => {
-                    filesystem::create_dir(&dir)?;
-
-                    rollback.register(filesystem::RollbackAction::RemoveDir(dir));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn initialization_plan(&self, repo_dir: &Path) -> Vec<LayoutAction> {
-        let mut actions = vec![];
+    pub fn initialization_plan(&self, repo_dir: &Path) -> Plan {
+        let mut plan = Plan::new();
 
         if !self.paths.config_dir().exists() {
-            actions.push(LayoutAction::CreateDirectory(
-                self.paths.config_dir().to_path_buf(),
-            ));
+            plan.push(
+                FileSystemAction::CreateDirectory(self.paths.config_dir().to_path_buf()).into(),
+            );
         }
         if !self.paths.storage_dir().exists() {
-            actions.push(LayoutAction::CreateDirectory(
-                self.paths.storage_dir().to_path_buf(),
-            ));
+            plan.push(
+                FileSystemAction::CreateDirectory(self.paths.storage_dir().to_path_buf()).into(),
+            );
         }
         if !self.paths.backup_dir().exists() {
-            actions.push(LayoutAction::CreateDirectory(
-                self.paths.backup_dir().to_path_buf(),
-            ));
+            plan.push(
+                FileSystemAction::CreateDirectory(self.paths.backup_dir().to_path_buf()).into(),
+            );
         }
         if !repo_dir.exists() {
-            actions.push(LayoutAction::CreateDirectory(repo_dir.to_path_buf()));
+            plan.push(FileSystemAction::CreateDirectory(repo_dir.to_path_buf()).into());
         }
 
-        actions
+        plan
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum LayoutAction {
-    CreateDirectory(PathBuf),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,7 +65,7 @@ pub enum DottyLayoutError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use tempfile::TempDir;
 
@@ -132,13 +110,25 @@ mod tests {
 
         let plan = layout.initialization_plan(&context.repo_dir);
 
-        assert!(plan.contains(&LayoutAction::CreateDirectory(context.config_dir.clone())));
+        assert!(
+            plan.actions()
+                .contains(&FileSystemAction::CreateDirectory(context.config_dir.clone()).into())
+        );
 
-        assert!(plan.contains(&LayoutAction::CreateDirectory(context.storage_dir.clone())));
+        assert!(
+            plan.actions()
+                .contains(&FileSystemAction::CreateDirectory(context.storage_dir.clone()).into())
+        );
 
-        assert!(plan.contains(&LayoutAction::CreateDirectory(context.paths.backup_dir())));
+        assert!(
+            plan.actions()
+                .contains(&FileSystemAction::CreateDirectory(context.paths.backup_dir()).into())
+        );
 
-        assert!(plan.contains(&LayoutAction::CreateDirectory(context.repo_dir.clone())));
+        assert!(
+            plan.actions()
+                .contains(&FileSystemAction::CreateDirectory(context.repo_dir.clone()).into())
+        );
     }
 
     #[test]
@@ -152,13 +142,27 @@ mod tests {
 
         let plan = layout.initialization_plan(&context.repo_dir);
 
-        assert!(!plan.contains(&LayoutAction::CreateDirectory(context.config_dir.clone())));
+        assert!(
+            !plan
+                .actions()
+                .contains(&FileSystemAction::CreateDirectory(context.config_dir.clone()).into())
+        );
 
-        assert!(!plan.contains(&LayoutAction::CreateDirectory(context.repo_dir.clone())));
+        assert!(
+            !plan
+                .actions()
+                .contains(&FileSystemAction::CreateDirectory(context.repo_dir.clone()).into())
+        );
 
-        assert!(plan.contains(&LayoutAction::CreateDirectory(context.storage_dir.clone())));
+        assert!(
+            plan.actions()
+                .contains(&FileSystemAction::CreateDirectory(context.storage_dir.clone()).into())
+        );
 
-        assert!(plan.contains(&LayoutAction::CreateDirectory(context.paths.backup_dir())));
+        assert!(
+            plan.actions()
+                .contains(&FileSystemAction::CreateDirectory(context.paths.backup_dir()).into())
+        );
     }
 
     #[test]
@@ -174,7 +178,7 @@ mod tests {
 
         let plan = layout.initialization_plan(&context.repo_dir);
 
-        assert!(plan.is_empty());
+        assert!(plan.actions().is_empty());
     }
 
     #[test]

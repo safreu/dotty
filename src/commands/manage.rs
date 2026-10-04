@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::{
-    application::{DotfileManager, DotfileManagerError, DotfileManagerLoadError, OperationError},
+    application::{DotfileManager, DotfileManagerError, DotfileManagerLoadError},
     domain::EntryKind,
     infrastructure::{
         filesystem::{DottyLayout, DottyLayoutError},
@@ -39,7 +39,7 @@ pub enum ManageError {
     #[error(transparent)]
     ManagerLoad(#[from] DotfileManagerLoadError),
     #[error(transparent)]
-    Operation(#[from] OperationError<DotfileManagerError>),
+    DotfileManager(#[from] DotfileManagerError),
     #[error(transparent)]
     Layout(#[from] DottyLayoutError),
 }

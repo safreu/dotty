@@ -14,6 +14,16 @@ where
     Ok(value)
 }
 
+pub fn serialize_toml<T>(value: &T) -> Result<Vec<u8>, TomlError>
+where
+    T: Serialize,
+{
+    let content = toml::to_string_pretty(value).map_err(|_| TomlError::Write)?;
+
+    Ok(content.into_bytes())
+}
+
+#[allow(unused)]
 pub fn write_toml<T>(to_write: &T, path: &Path) -> Result<(), TomlError>
 where
     T: Serialize,

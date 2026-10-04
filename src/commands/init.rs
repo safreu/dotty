@@ -1,11 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{
+    application::{Plan, PlanExecutionError, PlanExecutor},
     domain::{BackupRoot, ConfigRoot},
     infrastructure::{
-        filesystem::{
-            DottyLayout, DottyLayoutError, RollbackAction, RollbackOperationError, RollbackStack,
-        },
+        filesystem::{DottyLayout, FileSystemAction},
         persistence::{
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
@@ -17,37 +16,41 @@ use crate::{
 pub fn execute(repo_dir: PathBuf) -> Result<(), InitError> {
     let paths = DottyPaths::discover()?;
     let layout = DottyLayout::new(&paths);
-    let mut rollback = RollbackStack::new();
 
     if layout.is_initialized() {
         return Err(InitError::AlreadyInit);
     }
 
-    if let Err(e) = layout.initialize(&repo_dir, &mut rollback) {
-        return Err(rollback.fail(InitOperationError::Layout(e)).into());
-    }
+    let plan = build_plan(&paths, &layout, &repo_dir)?;
 
-    let config = ConfigRoot::new(repo_dir);
-    let backups = BackupRoot::new();
+    PlanExecutor::execute(plan)?;
 
+    Ok(())
+}
+
+fn build_plan(
+    paths: &DottyPaths,
+    layout: &DottyLayout,
+    repo_dir: &Path,
+) -> Result<Plan, InitError> {
     let config_repository = ConfigRepository::new(paths.config_file());
     let backups_repository = BackupRepository::new(paths.backup_file());
 
-    if let Err(e) = config_repository.write(&config) {
-        return Err(rollback.fail(InitOperationError::Config(e)).into());
-    }
-    rollback.register(RollbackAction::RemoveFile(
-        paths.config_file().to_path_buf(),
-    ));
+    let mut plan = layout.initialization_plan(repo_dir);
 
-    if let Err(e) = backups_repository.write(&backups) {
-        return Err(rollback.fail(InitOperationError::Backups(e)).into());
-    };
-    rollback.register(RollbackAction::RemoveFile(
-        paths.backup_file().to_path_buf(),
-    ));
+    let config = ConfigRoot::new(repo_dir.to_path_buf());
+    let backups = BackupRoot::new();
 
-    Ok(())
+    let config_write = config_repository.prepare_write(&config)?;
+    let backups_write = backups_repository.prepare_write(&backups)?;
+
+    let (path, contents) = config_write.into_parts();
+    plan.push(FileSystemAction::WriteFile { path, contents }.into());
+
+    let (path, contents) = backups_write.into_parts();
+    plan.push(FileSystemAction::WriteFile { path, contents }.into());
+
+    Ok(plan)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,17 +60,11 @@ pub enum InitError {
     #[error(transparent)]
     PathDiscovery(#[from] DottyPathsError),
     #[error(transparent)]
-    Operation(#[from] RollbackOperationError<InitOperationError>),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum InitOperationError {
+    PlanExecution(#[from] PlanExecutionError),
     #[error(transparent)]
     Config(#[from] ConfigRepositoryError),
     #[error(transparent)]
     Backups(#[from] BackupRepositoryError),
-    #[error(transparent)]
-    Layout(#[from] DottyLayoutError),
 }
 
 #[cfg(test)]
@@ -77,6 +74,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::infrastructure::filesystem::FileSystemAction;
 
     #[test]
     fn init_creates_config_file() {
@@ -86,19 +84,14 @@ mod tests {
         let storage_dir = temp.path().join("storage");
         let repo_dir = temp.path().join("repo");
 
-        let paths = DottyPaths::new(config_dir.clone(), storage_dir);
-
+        let paths = DottyPaths::new(config_dir, storage_dir);
         let layout = DottyLayout::new(&paths);
-        let mut rollback = RollbackStack::new();
 
-        layout.initialize(&repo_dir, &mut rollback).unwrap();
+        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
 
-        let config = ConfigRoot::new(repo_dir);
+        PlanExecutor::execute(plan).unwrap();
 
-        let repository = ConfigRepository::new(paths.config_file());
-        repository.write(&config).unwrap();
-
-        assert!(paths.config_file().exists());
+        assert!(paths.config_file().is_file());
     }
 
     #[test]
@@ -110,18 +103,13 @@ mod tests {
         let repo_dir = temp.path().join("repo");
 
         let paths = DottyPaths::new(config_dir, storage_dir);
-
         let layout = DottyLayout::new(&paths);
-        let mut rollback = RollbackStack::new();
 
-        layout.initialize(&repo_dir, &mut rollback).unwrap();
+        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
 
-        let backups = BackupRoot::new();
+        PlanExecutor::execute(plan).unwrap();
 
-        let repository = BackupRepository::new(paths.backup_file());
-        repository.write(&backups).unwrap();
-
-        assert!(paths.backup_file().exists());
+        assert!(paths.backup_file().is_file());
     }
 
     #[test]
@@ -133,11 +121,11 @@ mod tests {
         let repo_dir = temp.path().join("repo");
 
         let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
-
         let layout = DottyLayout::new(&paths);
-        let mut rollback = RollbackStack::new();
 
-        layout.initialize(&repo_dir, &mut rollback).unwrap();
+        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
+
+        PlanExecutor::execute(plan).unwrap();
 
         assert!(config_dir.is_dir());
         assert!(storage_dir.is_dir());
@@ -146,7 +134,49 @@ mod tests {
     }
 
     #[test]
-    fn rollback_removes_directories_created_during_initialization() {
+    fn init_persists_valid_config() {
+        let temp = TempDir::new().unwrap();
+
+        let config_dir = temp.path().join("config");
+        let storage_dir = temp.path().join("storage");
+        let repo_dir = temp.path().join("repo");
+
+        let paths = DottyPaths::new(config_dir, storage_dir);
+        let layout = DottyLayout::new(&paths);
+
+        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
+
+        PlanExecutor::execute(plan).unwrap();
+
+        let repository = ConfigRepository::new(paths.config_file());
+        let config = repository.read().unwrap();
+
+        assert_eq!(config.config().dotfiles_dir(), &repo_dir,);
+    }
+
+    #[test]
+    fn init_persists_valid_backup_root() {
+        let temp = TempDir::new().unwrap();
+
+        let config_dir = temp.path().join("config");
+        let storage_dir = temp.path().join("storage");
+        let repo_dir = temp.path().join("repo");
+
+        let paths = DottyPaths::new(config_dir, storage_dir);
+        let layout = DottyLayout::new(&paths);
+
+        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
+
+        PlanExecutor::execute(plan).unwrap();
+
+        let repository = BackupRepository::new(paths.backup_file());
+        let backups = repository.read().unwrap();
+
+        assert!(backups.backups().is_empty());
+    }
+
+    #[test]
+    fn init_rolls_back_complete_initialization_when_later_action_fails() {
         let temp = TempDir::new().unwrap();
 
         let config_dir = temp.path().join("config");
@@ -154,25 +184,29 @@ mod tests {
         let repo_dir = temp.path().join("repo");
 
         let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
-
         let layout = DottyLayout::new(&paths);
-        let mut rollback = RollbackStack::new();
 
-        layout.initialize(&repo_dir, &mut rollback).unwrap();
+        let mut plan = build_plan(&paths, &layout, &repo_dir).unwrap();
 
-        assert!(config_dir.exists());
-        assert!(storage_dir.exists());
-        assert!(repo_dir.exists());
+        let missing = temp.path().join("missing");
 
-        rollback.rollback().unwrap();
+        plan.push(FileSystemAction::RemoveFile(missing).into());
 
-        assert!(!config_dir.exists());
+        let result = PlanExecutor::execute(plan);
+
+        assert!(result.is_err());
+
+        assert!(!paths.config_file().exists());
+        assert!(!paths.backup_file().exists());
+
+        assert!(!paths.backup_dir().exists());
         assert!(!storage_dir.exists());
+        assert!(!config_dir.exists());
         assert!(!repo_dir.exists());
     }
 
     #[test]
-    fn rollback_preserves_preexisting_directories() {
+    fn init_rollback_preserves_preexisting_directories() {
         let temp = TempDir::new().unwrap();
 
         let config_dir = temp.path().join("config");
@@ -183,54 +217,25 @@ mod tests {
         fs::create_dir_all(&repo_dir).unwrap();
 
         let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
-
         let layout = DottyLayout::new(&paths);
-        let mut rollback = RollbackStack::new();
 
-        layout.initialize(&repo_dir, &mut rollback).unwrap();
+        let mut plan = build_plan(&paths, &layout, &repo_dir).unwrap();
+
+        let missing = temp.path().join("missing");
+
+        plan.push(FileSystemAction::RemoveFile(missing).into());
+
+        let result = PlanExecutor::execute(plan);
+
+        assert!(result.is_err());
 
         assert!(config_dir.exists());
-        assert!(storage_dir.exists());
         assert!(repo_dir.exists());
 
-        rollback.rollback().unwrap();
-
-        // These existed before initialization, so Dotty must preserve them.
-        assert!(config_dir.exists());
-        assert!(repo_dir.exists());
-
-        // This was created by initialization, so rollback removes it.
         assert!(!storage_dir.exists());
-    }
-
-    #[test]
-    fn rollback_removes_files_registered_during_initialization() {
-        let temp = TempDir::new().unwrap();
-
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
-
-        let paths = DottyPaths::new(config_dir, storage_dir);
-
-        let layout = DottyLayout::new(&paths);
-        let mut rollback = RollbackStack::new();
-
-        layout.initialize(&repo_dir, &mut rollback).unwrap();
-
-        let config = ConfigRoot::new(repo_dir);
-        let config_repository = ConfigRepository::new(paths.config_file());
-
-        config_repository.write(&config).unwrap();
-
-        rollback.register(RollbackAction::RemoveFile(
-            paths.config_file().to_path_buf(),
-        ));
-
-        assert!(paths.config_file().exists());
-
-        rollback.rollback().unwrap();
+        assert!(!paths.backup_dir().exists());
 
         assert!(!paths.config_file().exists());
+        assert!(!paths.backup_file().exists());
     }
 }

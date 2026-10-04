@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::{
     domain::BackupRoot,
-    infrastructure::persistence::{self, TomlError},
+    infrastructure::persistence::{self, PreparedWrite, TomlError},
 };
 
 #[derive(Debug)]
@@ -19,8 +19,19 @@ impl BackupRepository {
         persistence::read_toml(&self.path).map_err(BackupRepositoryError::Read)
     }
 
+    #[allow(unused)]
     pub fn write(&self, backups: &BackupRoot) -> Result<(), BackupRepositoryError> {
         persistence::write_toml(backups, &self.path).map_err(BackupRepositoryError::Write)
+    }
+
+    pub fn prepare_write(
+        &self,
+        backups: &BackupRoot,
+    ) -> Result<PreparedWrite, BackupRepositoryError> {
+        let contents =
+            persistence::serialize_toml(backups).map_err(BackupRepositoryError::Write)?;
+
+        Ok(PreparedWrite::new(self.path.clone(), contents))
     }
 }
 
