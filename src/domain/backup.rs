@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use serde::{Deserialize, Serialize};
@@ -31,18 +31,16 @@ impl BackupRoot {
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct BackupEntry {
-    original_path: PathBuf,
     kind: EntryKind,
     backups: HashSet<BackupKind>,
 }
 
 impl BackupEntry {
-    pub fn new(target: &Path, entry_kind: &EntryKind, backup_kind: BackupKind) -> Self {
+    pub fn new(entry_kind: &EntryKind, backup_kind: BackupKind) -> Self {
         let mut backups = HashSet::new();
         backups.insert(backup_kind);
 
         Self {
-            original_path: target.to_path_buf(),
             kind: entry_kind.clone(),
             backups,
         }

@@ -84,7 +84,7 @@ impl DotfileManager {
 
         let managed_entry = transaction.handle(result)?;
 
-        let new_backup_entry = BackupEntry::new(&target, &entry_kind, BackupKind::Link);
+        let new_backup_entry = BackupEntry::new(&entry_kind, BackupKind::Link);
 
         match transaction
             .backups_mut()

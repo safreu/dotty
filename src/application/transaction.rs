@@ -256,8 +256,8 @@ mod tests {
             ManagedEntry::new(target, &self.dotfiles_dir, &EntryKind::File).unwrap()
         }
 
-        fn backup_entry(&self, target: &std::path::Path) -> BackupEntry {
-            BackupEntry::new(target, &EntryKind::File, BackupKind::Link)
+        fn backup_entry(&self) -> BackupEntry {
+            BackupEntry::new(&EntryKind::File, BackupKind::Link)
         }
     }
 
@@ -348,7 +348,7 @@ mod tests {
             transaction
                 .backups_mut()
                 .backups_mut()
-                .insert(target.clone(), ctx.backup_entry(&target));
+                .insert(target.clone(), ctx.backup_entry());
 
             transaction.restore_metadata().unwrap();
         }
@@ -410,7 +410,7 @@ mod tests {
             transaction
                 .backups_mut()
                 .backups_mut()
-                .insert(target.clone(), ctx.backup_entry(&target));
+                .insert(target.clone(), ctx.backup_entry());
 
             let error = transaction.fail("operation failed");
 
@@ -719,7 +719,7 @@ mod tests {
             transaction
                 .backups_mut()
                 .backups_mut()
-                .insert(target.clone(), ctx.backup_entry(&target));
+                .insert(target.clone(), ctx.backup_entry());
 
             transaction.commit().unwrap();
         }

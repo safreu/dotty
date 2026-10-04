@@ -1,11 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use crate::{
-    domain::{
-        BackupKind,
-        EntryKind,
-        ManagedEntry,
-    },
+    domain::{BackupKind, EntryKind, ManagedEntry},
     infrastructure::filesystem::{FileSystemError, copy_dir},
 };
 
