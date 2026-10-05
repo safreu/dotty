@@ -14,7 +14,7 @@ pub struct ManagedEntry {
 impl ManagedEntry {
     pub fn new(
         target: &Path,
-        dotfiles_dir: &Path,
+        repo_dir: &Path,
         kind: &EntryKind,
     ) -> Result<Self, ManagedEntryError> {
         let filename = target
@@ -25,7 +25,7 @@ impl ManagedEntry {
 
         let managed_filename = filename.strip_prefix(".").unwrap_or(&filename).to_owned();
 
-        let stored_at = dotfiles_dir.join(&managed_filename);
+        let stored_at = repo_dir.join(&managed_filename);
 
         Ok(Self {
             filename,

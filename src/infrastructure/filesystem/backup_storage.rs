@@ -85,7 +85,7 @@ mod tests {
     struct TestContext {
         _temp: TempDir,
         backup_root: PathBuf,
-        dotfiles_dir: PathBuf,
+        repo_dir: PathBuf,
         target: PathBuf,
     }
 
@@ -94,17 +94,17 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
 
             let backup_root = temp.path().join("backups");
-            let dotfiles_dir = temp.path().join("dotfiles");
+            let repo_dir = temp.path().join("repo");
             let target = temp.path().join(".zshrc");
 
             fs::create_dir(&backup_root).unwrap();
-            fs::create_dir(&dotfiles_dir).unwrap();
+            fs::create_dir(&repo_dir).unwrap();
             fs::write(&target, "hello").unwrap();
 
             Self {
                 _temp: temp,
                 backup_root,
-                dotfiles_dir,
+                repo_dir,
                 target,
             }
         }
@@ -114,7 +114,7 @@ mod tests {
         }
 
         fn entry(&self) -> ManagedEntry {
-            ManagedEntry::new(&self.target, &self.dotfiles_dir, &EntryKind::File).unwrap()
+            ManagedEntry::new(&self.target, &self.repo_dir, &EntryKind::File).unwrap()
         }
 
         fn entry_backup_dir(&self) -> PathBuf {

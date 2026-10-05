@@ -153,7 +153,7 @@ mod tests {
         let repository = ConfigRepository::new(paths.config_file());
         let config = repository.read().unwrap();
 
-        assert_eq!(config.config().dotfiles_dir(), &repo_dir,);
+        assert_eq!(config.config().repo_dir(), &repo_dir,);
     }
 
     #[test]

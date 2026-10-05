@@ -26,7 +26,7 @@ enum Commands {
     Init {
         #[arg(long)]
         // This path will be used to store the dotfiles, in case it doesn't exist yet it will be created
-        dotfiles_dir_path: PathBuf,
+        repo_dir_path: PathBuf,
     },
     // Dotty will manage itself, meaning after init, program will call dotty manage 'self'
     Manage {
@@ -44,7 +44,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { dotfiles_dir_path } => match init::execute(dotfiles_dir_path) {
+        Commands::Init { repo_dir_path } => match init::execute(repo_dir_path) {
             Ok(_) => println!("Init success"),
             Err(e) => println!("Failed with {}", e),
         },

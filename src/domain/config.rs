@@ -11,9 +11,9 @@ pub struct ConfigRoot {
 }
 
 impl ConfigRoot {
-    pub fn new(dotfiles_dir: PathBuf) -> Self {
+    pub fn new(repo_dir: PathBuf) -> Self {
         Self {
-            config: Config { dotfiles_dir },
+            config: Config { repo_dir },
             manages: HashSet::new(),
         }
     }
@@ -33,11 +33,11 @@ impl ConfigRoot {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    dotfiles_dir: PathBuf,
+    repo_dir: PathBuf,
 }
 
 impl Config {
-    pub fn dotfiles_dir(&self) -> &PathBuf {
-        &self.dotfiles_dir
+    pub fn repo_dir(&self) -> &PathBuf {
+        &self.repo_dir
     }
 }
