@@ -13,3 +13,6 @@ pub use layout::{DottyLayout, DottyLayoutError};
 
 mod action;
 pub use action::{Action, ActionError, FileSystemAction};
+
+mod repository_layout;
+pub use repository_layout::{RepositoryLayout, RepositoryLayoutError};

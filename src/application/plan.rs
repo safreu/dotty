@@ -19,6 +19,10 @@ impl Plan {
         self.actions
     }
 
+    pub fn extend(&mut self, other: Plan) {
+        self.actions.extend(other.actions);
+    }
+
     #[cfg(test)]
     pub fn actions(&self) -> &[Action] {
         &self.actions

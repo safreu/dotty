@@ -19,7 +19,7 @@ impl<'a> DottyLayout<'a> {
 
     pub fn is_initialized(&self) -> Result<bool, DottyLayoutError> {
         let config = filesystem::path_kind(&self.paths.config_file())?;
-        let backups = filesystem::path_kind(&self.paths.config_file())?;
+        let backups = filesystem::path_kind(&self.paths.backup_file())?;
 
         Ok(matches!(config, Some(PathKind::File)) && matches!(backups, Some(PathKind::File)))
     }
@@ -32,13 +32,12 @@ impl<'a> DottyLayout<'a> {
         }
     }
 
-    pub fn initialization_plan(&self, repo_dir: &Path) -> Result<Plan, DottyLayoutError> {
+    pub fn initialization_plan(&self) -> Result<Plan, DottyLayoutError> {
         let mut plan = Plan::new();
 
         self.plan_directory(&mut plan, self.paths.config_dir())?;
         self.plan_directory(&mut plan, self.paths.storage_dir())?;
         self.plan_directory(&mut plan, &self.paths.backup_dir())?;
-        self.plan_directory(&mut plan, repo_dir)?;
 
         Ok(plan)
     }
@@ -76,7 +75,6 @@ mod tests {
         temp_dir: TempDir,
         config_dir: PathBuf,
         storage_dir: PathBuf,
-        repo_dir: PathBuf,
         paths: DottyPaths,
     }
 
@@ -86,7 +84,6 @@ mod tests {
 
             let config_dir = temp_dir.path().join("config");
             let storage_dir = temp_dir.path().join("storage");
-            let repo_dir = temp_dir.path().join("repo");
 
             let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
 
@@ -94,7 +91,6 @@ mod tests {
                 temp_dir,
                 config_dir,
                 storage_dir,
-                repo_dir,
                 paths,
             }
         }
@@ -109,7 +105,7 @@ mod tests {
         let context = TestContext::new();
         let layout = context.layout();
 
-        let plan = layout.initialization_plan(&context.repo_dir).unwrap();
+        let plan = layout.initialization_plan().unwrap();
 
         assert!(
             plan.actions()
@@ -125,11 +121,6 @@ mod tests {
             plan.actions()
                 .contains(&FileSystemAction::CreateDirectory(context.paths.backup_dir()).into())
         );
-
-        assert!(
-            plan.actions()
-                .contains(&FileSystemAction::CreateDirectory(context.repo_dir.clone()).into())
-        );
     }
 
     #[test]
@@ -137,22 +128,15 @@ mod tests {
         let context = TestContext::new();
 
         fs::create_dir_all(&context.config_dir).unwrap();
-        fs::create_dir_all(&context.repo_dir).unwrap();
 
         let layout = context.layout();
 
-        let plan = layout.initialization_plan(&context.repo_dir).unwrap();
+        let plan = layout.initialization_plan().unwrap();
 
         assert!(
             !plan
                 .actions()
                 .contains(&FileSystemAction::CreateDirectory(context.config_dir.clone()).into())
-        );
-
-        assert!(
-            !plan
-                .actions()
-                .contains(&FileSystemAction::CreateDirectory(context.repo_dir.clone()).into())
         );
 
         assert!(
@@ -173,11 +157,10 @@ mod tests {
         fs::create_dir_all(&context.config_dir).unwrap();
         fs::create_dir_all(&context.storage_dir).unwrap();
         fs::create_dir_all(context.paths.backup_dir()).unwrap();
-        fs::create_dir_all(&context.repo_dir).unwrap();
 
         let layout = context.layout();
 
-        let plan = layout.initialization_plan(&context.repo_dir).unwrap();
+        let plan = layout.initialization_plan().unwrap();
 
         assert!(plan.actions().is_empty());
     }
@@ -187,12 +170,11 @@ mod tests {
         let context = TestContext::new();
         let layout = context.layout();
 
-        let _ = layout.initialization_plan(&context.repo_dir).unwrap();
+        let _ = layout.initialization_plan().unwrap();
 
         assert!(!context.config_dir.exists());
         assert!(!context.storage_dir.exists());
         assert!(!context.paths.backup_dir().exists());
-        assert!(!context.repo_dir.exists());
     }
 
     #[test]
@@ -203,7 +185,7 @@ mod tests {
 
         let layout = context.layout();
 
-        let result = layout.initialization_plan(&context.repo_dir);
+        let result = layout.initialization_plan();
 
         assert!(matches!(
             result,
@@ -223,7 +205,7 @@ mod tests {
 
         let layout = context.layout();
 
-        let result = layout.initialization_plan(&context.repo_dir);
+        let result = layout.initialization_plan();
 
         assert!(matches!(
             result,
@@ -242,7 +224,7 @@ mod tests {
 
         let layout = context.layout();
 
-        let result = layout.initialization_plan(&context.repo_dir);
+        let result = layout.initialization_plan();
 
         assert!(matches!(
             result,

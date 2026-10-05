@@ -2,6 +2,12 @@ pub mod backup;
 pub mod config;
 pub mod paths;
 
+mod manifest;
+pub use manifest::{ManifestRepository, ManifestRepositoryError};
+
+mod repository_paths;
+pub use repository_paths::RepositoryPaths;
+
 mod toml;
 use std::path::PathBuf;
 

@@ -2,10 +2,14 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     application::{Plan, PlanExecutionError, PlanExecutor},
-    domain::{BackupRoot, ConfigRoot},
+    domain::{BackupRoot, ConfigRoot, ManifestRoot},
     infrastructure::{
-        filesystem::{DottyLayout, DottyLayoutError, FileSystemAction},
+        filesystem::{
+            DottyLayout, DottyLayoutError, FileSystemAction, RepositoryLayout,
+            RepositoryLayoutError,
+        },
         persistence::{
+            ManifestRepository, ManifestRepositoryError, RepositoryPaths,
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
             paths::{DottyPaths, DottyPathsError},
@@ -36,18 +40,33 @@ fn build_plan(
     let config_repository = ConfigRepository::new(paths.config_file());
     let backups_repository = BackupRepository::new(paths.backup_file());
 
-    let mut plan = layout.initialization_plan(repo_dir)?;
+    let repository_paths = RepositoryPaths::new(repo_dir.to_path_buf());
+
+    let manifest_repository = ManifestRepository::new(&repository_paths.manifest_file());
+
+    let repository_layout = RepositoryLayout::new(&repository_paths);
+
+    let mut plan = layout.initialization_plan()?;
+
+    let repository_plan = repository_layout.initialization_plan()?;
+
+    plan.extend(repository_plan);
 
     let config = ConfigRoot::new(repo_dir.to_path_buf());
     let backups = BackupRoot::new();
+    let manifest = ManifestRoot::new();
 
     let config_write = config_repository.prepare_write(&config)?;
     let backups_write = backups_repository.prepare_write(&backups)?;
+    let manifest_write = manifest_repository.prepare_write(&manifest)?;
 
     let (path, contents) = config_write.into_parts();
     plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
     let (path, contents) = backups_write.into_parts();
+    plan.push(FileSystemAction::WriteFile { path, contents }.into());
+
+    let (path, contents) = manifest_write.into_parts();
     plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
     Ok(plan)
@@ -67,6 +86,10 @@ pub enum InitError {
     Backups(#[from] BackupRepositoryError),
     #[error(transparent)]
     Layout(#[from] DottyLayoutError),
+    #[error(transparent)]
+    RepositoryLayout(#[from] RepositoryLayoutError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestRepositoryError),
 }
 
 #[cfg(test)]
@@ -76,121 +99,145 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::infrastructure::filesystem::FileSystemAction;
+    use crate::infrastructure::{filesystem::FileSystemAction, persistence::RepositoryPaths};
+
+    struct TestContext {
+        _temp: TempDir,
+        config_dir: PathBuf,
+        storage_dir: PathBuf,
+        repo_dir: PathBuf,
+        paths: DottyPaths,
+    }
+
+    impl TestContext {
+        fn new() -> Self {
+            let temp = TempDir::new().unwrap();
+
+            let config_dir = temp.path().join("config");
+            let storage_dir = temp.path().join("storage");
+            let repo_dir = temp.path().join("repo");
+
+            let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
+
+            Self {
+                _temp: temp,
+                config_dir,
+                storage_dir,
+                repo_dir,
+                paths,
+            }
+        }
+
+        fn layout(&self) -> DottyLayout<'_> {
+            DottyLayout::new(&self.paths)
+        }
+
+        fn repository_paths(&self) -> RepositoryPaths {
+            RepositoryPaths::new(self.repo_dir.clone())
+        }
+
+        fn build_plan(&self) -> Plan {
+            let layout = self.layout();
+
+            super::build_plan(&self.paths, &layout, &self.repo_dir).unwrap()
+        }
+
+        fn initialize(&self) {
+            PlanExecutor::execute(self.build_plan()).unwrap();
+        }
+    }
 
     #[test]
     fn init_creates_config_file() {
-        let temp = TempDir::new().unwrap();
+        let context = TestContext::new();
 
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
+        context.initialize();
 
-        let paths = DottyPaths::new(config_dir, storage_dir);
-        let layout = DottyLayout::new(&paths);
-
-        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
-
-        PlanExecutor::execute(plan).unwrap();
-
-        assert!(paths.config_file().is_file());
+        assert!(context.paths.config_file().is_file());
     }
 
     #[test]
     fn init_creates_backup_file() {
-        let temp = TempDir::new().unwrap();
+        let context = TestContext::new();
 
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
+        context.initialize();
 
-        let paths = DottyPaths::new(config_dir, storage_dir);
-        let layout = DottyLayout::new(&paths);
+        assert!(context.paths.backup_file().is_file());
+    }
 
-        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
+    #[test]
+    fn init_creates_manifest_file() {
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
 
-        PlanExecutor::execute(plan).unwrap();
+        context.initialize();
 
-        assert!(paths.backup_file().is_file());
+        assert!(repository_paths.manifest_file().is_file());
     }
 
     #[test]
     fn init_creates_required_directories() {
-        let temp = TempDir::new().unwrap();
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
 
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
+        context.initialize();
 
-        let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
-        let layout = DottyLayout::new(&paths);
+        assert!(context.config_dir.is_dir());
+        assert!(context.storage_dir.is_dir());
+        assert!(context.paths.backup_dir().is_dir());
 
-        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
-
-        PlanExecutor::execute(plan).unwrap();
-
-        assert!(config_dir.is_dir());
-        assert!(storage_dir.is_dir());
-        assert!(paths.backup_dir().is_dir());
-        assert!(repo_dir.is_dir());
+        assert!(context.repo_dir.is_dir());
+        assert!(repository_paths.metadata_dir().is_dir());
     }
 
     #[test]
     fn init_persists_valid_config() {
-        let temp = TempDir::new().unwrap();
+        let context = TestContext::new();
 
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
+        context.initialize();
 
-        let paths = DottyPaths::new(config_dir, storage_dir);
-        let layout = DottyLayout::new(&paths);
+        let repository = ConfigRepository::new(context.paths.config_file());
 
-        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
-
-        PlanExecutor::execute(plan).unwrap();
-
-        let repository = ConfigRepository::new(paths.config_file());
         let config = repository.read().unwrap();
 
-        assert_eq!(config.config().repo_dir(), &repo_dir,);
+        assert_eq!(config.repo_dir(), &context.repo_dir);
     }
 
     #[test]
     fn init_persists_valid_backup_root() {
-        let temp = TempDir::new().unwrap();
+        let context = TestContext::new();
 
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
+        context.initialize();
 
-        let paths = DottyPaths::new(config_dir, storage_dir);
-        let layout = DottyLayout::new(&paths);
+        let repository = BackupRepository::new(context.paths.backup_file());
 
-        let plan = build_plan(&paths, &layout, &repo_dir).unwrap();
-
-        PlanExecutor::execute(plan).unwrap();
-
-        let repository = BackupRepository::new(paths.backup_file());
         let backups = repository.read().unwrap();
 
         assert!(backups.backups().is_empty());
     }
 
     #[test]
+    fn init_persists_valid_manifest_root() {
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
+
+        context.initialize();
+
+        let repository = ManifestRepository::new(&repository_paths.manifest_file());
+
+        let manifest = repository.read().unwrap();
+
+        assert!(manifest.manages().is_empty());
+    }
+
+    #[test]
     fn init_rolls_back_complete_initialization_when_later_action_fails() {
-        let temp = TempDir::new().unwrap();
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
 
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
+        let mut plan = context.build_plan();
 
-        let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
-        let layout = DottyLayout::new(&paths);
-
-        let mut plan = build_plan(&paths, &layout, &repo_dir).unwrap();
-
-        let missing = temp.path().join("missing");
+        let missing = context._temp.path().join("missing");
 
         plan.push(FileSystemAction::RemoveFile(missing).into());
 
@@ -198,32 +245,28 @@ mod tests {
 
         assert!(result.is_err());
 
-        assert!(!paths.config_file().exists());
-        assert!(!paths.backup_file().exists());
+        assert!(!context.paths.config_file().exists());
+        assert!(!context.paths.backup_file().exists());
+        assert!(!repository_paths.manifest_file().exists());
 
-        assert!(!paths.backup_dir().exists());
-        assert!(!storage_dir.exists());
-        assert!(!config_dir.exists());
-        assert!(!repo_dir.exists());
+        assert!(!repository_paths.metadata_dir().exists());
+        assert!(!context.paths.backup_dir().exists());
+        assert!(!context.storage_dir.exists());
+        assert!(!context.config_dir.exists());
+        assert!(!context.repo_dir.exists());
     }
 
     #[test]
     fn init_rollback_preserves_preexisting_directories() {
-        let temp = TempDir::new().unwrap();
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
 
-        let config_dir = temp.path().join("config");
-        let storage_dir = temp.path().join("storage");
-        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&context.config_dir).unwrap();
+        fs::create_dir_all(&context.repo_dir).unwrap();
 
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::create_dir_all(&repo_dir).unwrap();
+        let mut plan = context.build_plan();
 
-        let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
-        let layout = DottyLayout::new(&paths);
-
-        let mut plan = build_plan(&paths, &layout, &repo_dir).unwrap();
-
-        let missing = temp.path().join("missing");
+        let missing = context._temp.path().join("missing");
 
         plan.push(FileSystemAction::RemoveFile(missing).into());
 
@@ -231,13 +274,15 @@ mod tests {
 
         assert!(result.is_err());
 
-        assert!(config_dir.exists());
-        assert!(repo_dir.exists());
+        assert!(context.config_dir.exists());
+        assert!(context.repo_dir.exists());
 
-        assert!(!storage_dir.exists());
-        assert!(!paths.backup_dir().exists());
+        assert!(!context.storage_dir.exists());
+        assert!(!context.paths.backup_dir().exists());
+        assert!(!repository_paths.metadata_dir().exists());
 
-        assert!(!paths.config_file().exists());
-        assert!(!paths.backup_file().exists());
+        assert!(!context.paths.config_file().exists());
+        assert!(!context.paths.backup_file().exists());
+        assert!(!repository_paths.manifest_file().exists());
     }
 }
