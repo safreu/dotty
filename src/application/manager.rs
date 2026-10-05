@@ -1,12 +1,17 @@
-use std::{collections::hash_map, fs, os::unix::fs::symlink, path::PathBuf};
+use std::{
+    collections::hash_map,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    application::{OperationError, OperationTransaction, TransactionCommitError},
+    application::{Plan, PlanExecutionError, PlanExecutor},
     domain::{
         BackupEntry, BackupKind, BackupRoot, ConfigRoot, EntryKind, ManagedEntry, ManagedEntryError,
     },
     infrastructure::{
-        filesystem::{self, BackupStorage, FileSystemError, RollbackAction},
+        filesystem::{
+            self, BackupStorage, BackupStorageError, FileSystemAction, FileSystemError, PathKind,
+        },
         persistence::{
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
@@ -60,37 +65,39 @@ impl DotfileManager {
         })
     }
 
-    pub fn manage(
-        &mut self,
-        target: PathBuf,
+    pub fn manage(&mut self, target: PathBuf) -> Result<(), DotfileManagerError> {
+        let entry_kind = match filesystem::path_kind(&target)? {
+            Some(PathKind::File) => EntryKind::File,
+            Some(PathKind::Directory) => EntryKind::Dir,
+            Some(PathKind::Symlink | PathKind::Other) | None => {
+                return Err(DotfileManagerError::UnsupportedTarget(target));
+            }
+        };
+
+        let (plan, config, backups) = self.build_manage_plan(&target, entry_kind)?;
+
+        PlanExecutor::execute(plan)?;
+
+        self.config = config;
+        self.backups = backups;
+
+        Ok(())
+    }
+
+    fn build_manage_plan(
+        &self,
+        target: &Path,
         entry_kind: EntryKind,
-    ) -> Result<(), OperationError<DotfileManagerError>> {
-        filesystem::create_dir(self.config.config().dotfiles_dir())
-            .map_err(DotfileManagerError::from)?;
+    ) -> Result<(Plan, ConfigRoot, BackupRoot), DotfileManagerError> {
+        let managed_entry =
+            ManagedEntry::new(target, self.config.config().dotfiles_dir(), &entry_kind)?;
 
-        let mut transaction = OperationTransaction::new(
-            &mut self.config,
-            &self.config_repository,
-            &mut self.backups,
-            &self.backups_repository,
-        );
-
-        let result = ManagedEntry::new(
-            &target,
-            transaction.config().config().dotfiles_dir(),
-            &entry_kind,
-        )
-        .map_err(DotfileManagerError::from);
-
-        let managed_entry = transaction.handle(result)?;
+        let mut config = self.config.clone();
+        let mut backups = self.backups.clone();
 
         let new_backup_entry = BackupEntry::new(&entry_kind, BackupKind::Link);
 
-        match transaction
-            .backups_mut()
-            .backups_mut()
-            .entry(target.clone())
-        {
+        match backups.backups_mut().entry(target.to_path_buf()) {
             hash_map::Entry::Occupied(entry) => {
                 entry.into_mut().backups_mut().insert(BackupKind::Link);
             }
@@ -99,130 +106,117 @@ impl DotfileManager {
             }
         };
 
-        let backup_result = self
+        config.manages_mut().insert(managed_entry.clone());
+
+        let mut plan = Plan::new();
+
+        for action in self
             .backup_storage
-            .backup(&managed_entry, BackupKind::Link)
-            .map_err(DotfileManagerError::from);
+            .backup_actions(&managed_entry, BackupKind::Link)?
+        {
+            plan.push(action.into());
+        }
 
-        transaction.handle(backup_result)?;
+        plan.push(
+            FileSystemAction::Rename {
+                from: target.to_path_buf(),
+                to: managed_entry.stored_at().to_path_buf(),
+            }
+            .into(),
+        );
 
-        let result =
-            fs::rename(&target, managed_entry.stored_at()).map_err(|_| DotfileManagerError::Move);
+        plan.push(
+            FileSystemAction::CreateSymlink {
+                target: managed_entry.stored_at().to_path_buf(),
+                link: managed_entry.points_to().to_path_buf(),
+            }
+            .into(),
+        );
 
-        transaction.handle(result)?;
+        let config_write = self.config_repository.prepare_write(&config)?;
+        let backups_write = self.backups_repository.prepare_write(&backups)?;
 
-        transaction.register(RollbackAction::Rename {
-            from: managed_entry.stored_at().to_path_buf(),
-            to: target.to_path_buf(),
-        });
+        let (path, contents) = config_write.into_parts();
+        plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
-        let result = symlink(managed_entry.stored_at(), managed_entry.points_to())
-            .map_err(|_| DotfileManagerError::Symlink);
+        let (path, contents) = backups_write.into_parts();
+        plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
-        transaction.handle(result)?;
+        Ok((plan, config, backups))
+    }
 
-        transaction.register(RollbackAction::RemoveSymlink(
-            managed_entry.points_to().to_path_buf(),
-        ));
+    pub fn forget(&mut self, target: PathBuf) -> Result<(), DotfileManagerError> {
+        match filesystem::path_kind(&target)? {
+            Some(PathKind::Symlink) => {}
+            _ => return Err(DotfileManagerError::NotSymlink(target.to_path_buf())),
+        }
 
-        transaction.config_mut().manages_mut().insert(managed_entry);
+        let (plan, config, backups) = self.build_forget_plan(&target)?;
 
-        transaction
-            .commit()
-            .map_err(|error| error.map_operation(DotfileManagerError::from))?;
+        PlanExecutor::execute(plan)?;
+
+        self.config = config;
+        self.backups = backups;
 
         Ok(())
     }
 
-    pub fn forget(&mut self, target: PathBuf) -> Result<(), OperationError<DotfileManagerError>> {
-        filesystem::create_dir(self.config.config().dotfiles_dir())
-            .map_err(DotfileManagerError::from)?;
+    fn build_forget_plan(
+        &self,
+        target: &Path,
+    ) -> Result<(Plan, ConfigRoot, BackupRoot), DotfileManagerError> {
+        let mut config = self.config.clone();
+        let mut backups = self.backups.clone();
 
-        if !target.is_symlink() {
-            return Err(OperationError::Operation(DotfileManagerError::Unmanaged(
-                target.clone(),
-            )));
-        }
-
-        let mut transaction = OperationTransaction::new(
-            &mut self.config,
-            &self.config_repository,
-            &mut self.backups,
-            &self.backups_repository,
-        );
-
-        let result = transaction
-            .config()
+        let managed_entry = config
             .manages()
             .iter()
-            .find(|entry| entry.points_to() == &target)
+            .find(|entry| entry.points_to() == target)
             .cloned()
-            .ok_or_else(|| DotfileManagerError::Unmanaged(target.clone()));
+            .ok_or_else(|| DotfileManagerError::Unmanaged(target.to_path_buf()))?;
 
-        let managed_entry = transaction.handle(result)?;
+        let backup_entry = backups
+            .backups_mut()
+            .get_mut(target)
+            .ok_or_else(|| DotfileManagerError::Unmanaged(target.to_path_buf()))?;
 
-        let backup_result = {
-            match transaction.backups_mut().backups_mut().get_mut(&target) {
-                Some(backup_entry) => {
-                    backup_entry.backups_mut().insert(BackupKind::Unlink);
+        backup_entry.backups_mut().insert(BackupKind::Unlink);
 
-                    Ok(())
-                }
-                None => Err(DotfileManagerError::Unmanaged(target.clone())),
-            }
-        };
+        config.manages_mut().remove(&managed_entry);
 
-        transaction.handle(backup_result)?;
+        let mut plan = Plan::new();
 
-        let backup_result = self
+        for action in self
             .backup_storage
-            .backup(&managed_entry, BackupKind::Unlink)
-            .map_err(DotfileManagerError::from);
+            .backup_actions(&managed_entry, BackupKind::Unlink)?
+        {
+            plan.push(action.into());
+        }
 
-        transaction.handle(backup_result)?;
+        plan.push(FileSystemAction::RemoveSymlink(target.to_path_buf()).into());
+        plan.push(
+            FileSystemAction::Rename {
+                from: managed_entry.stored_at().to_path_buf(),
+                to: target.to_path_buf(),
+            }
+            .into(),
+        );
 
-        let result = fs::remove_file(&target).map_err(|_| DotfileManagerError::DeleteSymlink);
+        let config_write = self.config_repository.prepare_write(&config)?;
+        let backups_write = self.backups_repository.prepare_write(&backups)?;
 
-        transaction.handle(result)?;
+        let (path, contents) = config_write.into_parts();
+        plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
-        transaction.register(RollbackAction::CreateSymlink {
-            source: managed_entry.stored_at().to_path_buf(),
-            destination: target.to_path_buf(),
-        });
+        let (path, contents) = backups_write.into_parts();
+        plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
-        let result =
-            fs::rename(managed_entry.stored_at(), &target).map_err(|_| DotfileManagerError::Move);
-
-        transaction.handle(result)?;
-
-        transaction.register(RollbackAction::Rename {
-            from: target.to_path_buf(),
-            to: managed_entry.stored_at().to_path_buf(),
-        });
-
-        transaction
-            .config_mut()
-            .manages_mut()
-            .remove(&managed_entry);
-
-        transaction
-            .commit()
-            .map_err(|error| error.map_operation(DotfileManagerError::from))?;
-
-        Ok(())
+        Ok((plan, config, backups))
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum DotfileManagerError {
-    #[error(transparent)]
-    PathCreation(#[from] FileSystemError),
-    #[error("Failed to move target")]
-    Move,
-    #[error("Failed to symlink target")]
-    Symlink,
-    #[error("Failed to remove symlink target")]
-    DeleteSymlink,
     #[error("This target is unmanaged already")]
     Unmanaged(PathBuf),
     #[error(transparent)]
@@ -232,7 +226,15 @@ pub enum DotfileManagerError {
     #[error(transparent)]
     BackupWrite(#[from] BackupRepositoryError),
     #[error(transparent)]
-    Commit(#[from] TransactionCommitError),
+    BackupStorage(#[from] BackupStorageError),
+    #[error(transparent)]
+    PlanExecution(#[from] PlanExecutionError),
+    #[error("This target is not a symlink: `{0}`")]
+    NotSymlink(PathBuf),
+    #[error(transparent)]
+    FileSystem(#[from] FileSystemError),
+    #[error("target cannot be managed: `{0}`")]
+    UnsupportedTarget(PathBuf),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -272,6 +274,8 @@ mod tests {
 
             let paths = DottyPaths::new(config_dir, storage_dir);
 
+            fs::create_dir_all(paths.backup_dir()).unwrap();
+
             Self {
                 temp,
                 paths,
@@ -301,7 +305,9 @@ mod tests {
 
         fn create_file(&self, name: &str, content: &str) -> PathBuf {
             let path = self.temp.path().join(name);
+
             fs::write(&path, content).unwrap();
+
             path
         }
 
@@ -339,7 +345,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let stored = ctx.dotfiles_dir.join("zshrc");
 
@@ -354,7 +360,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         assert!(target.is_symlink());
 
@@ -370,7 +376,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let config = ctx.read_config();
 
@@ -390,7 +396,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target, EntryKind::File).unwrap();
+        manager.manage(target).unwrap();
 
         let backup = ctx.link_backup("zshrc");
 
@@ -405,7 +411,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let backups = ctx.read_backups();
 
@@ -417,13 +423,44 @@ mod tests {
     }
 
     #[test]
+    fn manage_plan_rolls_back_when_later_action_fails() {
+        let ctx = TestContext::new();
+        let manager = ctx.manager();
+
+        let target = ctx.create_file(".zshrc", "hello");
+        let stored = ctx.dotfiles_dir.join("zshrc");
+
+        let (mut plan, _, _) = manager.build_manage_plan(&target, EntryKind::File).unwrap();
+
+        plan.push(FileSystemAction::RemoveFile(ctx.temp.path().join("does-not-exist")).into());
+
+        let result = PlanExecutor::execute(plan);
+
+        assert!(result.is_err());
+
+        assert!(target.exists());
+        assert!(!target.is_symlink());
+        assert!(!stored.exists());
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
+
+        assert!(!ctx.link_backup("zshrc").exists());
+
+        let config = ctx.read_config();
+        assert!(config.manages().is_empty());
+
+        let backups = ctx.read_backups();
+        assert!(backups.backups().is_empty());
+    }
+
+    #[test]
     fn forget_file_restores_original_file() {
         let ctx = TestContext::new();
         let mut manager = ctx.manager();
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target.clone()).unwrap();
 
@@ -440,7 +477,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let stored = ctx.dotfiles_dir.join("zshrc");
 
@@ -458,7 +495,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target).unwrap();
 
@@ -474,7 +511,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target).unwrap();
 
@@ -485,13 +522,72 @@ mod tests {
     }
 
     #[test]
+    fn forget_file_persists_unlink_backup_metadata() {
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let target = ctx.create_file(".zshrc", "hello");
+
+        manager.manage(target.clone()).unwrap();
+
+        manager.forget(target.clone()).unwrap();
+
+        let backups = ctx.read_backups();
+
+        let entry = backups.backups().get(&target).unwrap();
+
+        assert!(entry.backups().contains(&BackupKind::Link));
+        assert!(entry.backups().contains(&BackupKind::Unlink));
+    }
+
+    #[test]
+    fn forget_plan_rolls_back_when_later_action_fails() {
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let target = ctx.create_file(".zshrc", "hello");
+
+        manager.manage(target.clone()).unwrap();
+
+        let stored = ctx.dotfiles_dir.join("zshrc");
+
+        assert!(target.is_symlink());
+        assert!(stored.exists());
+
+        let (mut plan, _, _) = manager.build_forget_plan(&target).unwrap();
+
+        plan.push(FileSystemAction::RemoveFile(ctx.temp.path().join("does-not-exist")).into());
+
+        let result = PlanExecutor::execute(plan);
+
+        assert!(result.is_err());
+
+        assert!(target.is_symlink());
+        assert!(stored.exists());
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
+
+        assert!(!ctx.unlink_backup("zshrc").exists());
+
+        let config = ctx.read_config();
+
+        assert_eq!(config.manages().len(), 1);
+
+        let backups = ctx.read_backups();
+        let backup_entry = backups.backups().get(&target).unwrap();
+
+        assert!(backup_entry.backups().contains(&BackupKind::Link));
+        assert!(!backup_entry.backups().contains(&BackupKind::Unlink));
+    }
+
+    #[test]
     fn manage_and_forget_keep_both_safety_backups() {
         let ctx = TestContext::new();
         let mut manager = ctx.manager();
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target).unwrap();
 
@@ -510,9 +606,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(OperationError::Operation(
-                DotfileManagerError::Unmanaged(path)
-            )) if path == target
+            Err(DotfileManagerError::NotSymlink(path))
+                if path == target
         ));
     }
 
@@ -525,7 +620,7 @@ mod tests {
 
         let original = fs::read_to_string(&target).unwrap();
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         assert!(target.is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), original);
@@ -534,5 +629,63 @@ mod tests {
 
         assert!(!target.is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    }
+
+    #[test]
+    fn manage_directory_detects_directory_kind() {
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let target = ctx.temp.path().join(".config");
+        fs::create_dir(&target).unwrap();
+
+        manager.manage(target.clone()).unwrap();
+
+        let config = ctx.read_config();
+
+        let entry = config
+            .manages()
+            .iter()
+            .find(|entry| entry.points_to() == &target)
+            .unwrap();
+
+        assert_eq!(entry.kind(), &EntryKind::Dir);
+    }
+
+    #[test]
+    fn manage_symlink_returns_unsupported_target_error() {
+        use std::os::unix::fs::symlink;
+
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let destination = ctx.create_file("actual-file", "hello");
+        let target = ctx.temp.path().join("link");
+
+        symlink(destination, &target).unwrap();
+
+        let result = manager.manage(target.clone());
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::UnsupportedTarget(path))
+                if path == target
+        ));
+    }
+
+    #[test]
+    fn manage_missing_target_returns_unsupported_target_error() {
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let target = ctx.temp.path().join("does-not-exist");
+
+        let result = manager.manage(target.clone());
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::UnsupportedTarget(path))
+                if path == target
+        ));
     }
 }

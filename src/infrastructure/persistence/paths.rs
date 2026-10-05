@@ -58,6 +58,10 @@ impl DottyPaths {
     pub fn config_dir(&self) -> &Path {
         &self.config_dir
     }
+
+    pub fn storage_dir(&self) -> &PathBuf {
+        &self.storage_dir
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
