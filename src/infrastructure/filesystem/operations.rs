@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     os::unix::fs::symlink,
     path::{Path, PathBuf},
 };
@@ -37,11 +38,57 @@ pub fn read_file(path: &Path) -> Result<Vec<u8>, FileSystemError> {
         source,
     })
 }
-pub fn write_file(path: &Path, content: &[u8]) -> Result<(), FileSystemError> {
-    fs::write(path, content).map_err(|source| FileSystemError::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    })
+pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), FileSystemError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| FileSystemError::AtomicWriteFile {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file has no parent directory",
+            ),
+        })?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| {
+        FileSystemError::AtomicWriteFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+
+    tmp.write_all(content)
+        .map_err(|source| FileSystemError::AtomicWriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    tmp.flush()
+        .map_err(|source| FileSystemError::AtomicWriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    tmp.as_file()
+        .sync_all()
+        .map_err(|source| FileSystemError::AtomicWriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    tmp.persist(path)
+        .map_err(|error| FileSystemError::AtomicWriteFile {
+            path: path.to_path_buf(),
+            source: error.error,
+        })?;
+
+    fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|source| FileSystemError::AtomicWriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
 }
 pub fn remove_file(path: &Path) -> Result<(), FileSystemError> {
     fs::remove_file(path).map_err(|source| FileSystemError::RemoveFile {
@@ -80,7 +127,6 @@ pub fn copy_file(from: &Path, to: &Path) -> Result<(), FileSystemError> {
         })
 }
 
-// TODO: Rework the filetype distinction, and handle them correctly
 pub fn copy_dir(from: &Path, to: &Path) -> Result<(), FileSystemError> {
     if let Err(source) = copy_dir_inner(from, to) {
         let _ = fs::remove_dir_all(to);
@@ -104,12 +150,24 @@ fn copy_dir_inner(from: &Path, to: &Path) -> Result<(), std::io::Error> {
         let source = entry.path();
         let destination = to.join(entry.file_name());
 
-        if source.is_dir() {
+        let metadata = fs::symlink_metadata(&source)?;
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            let target = fs::read_link(&source)?;
+            symlink(target, destination)?;
+        } else if file_type.is_dir() {
             copy_dir_inner(&source, &destination)?;
-        } else {
+        } else if file_type.is_file() {
             fs::copy(&source, &destination)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("Unsupported filesystem entry: {}", source.display()),
+            ));
         }
     }
+
     Ok(())
 }
 
@@ -182,12 +240,6 @@ pub enum FileSystemError {
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to write file: `{path}`")]
-    WriteFile {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("failed to remove file: `{path}`")]
     RemoveFile {
         path: PathBuf,
@@ -236,15 +288,27 @@ pub enum FileSystemError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("cannot write to unsupported filesystem entry: `{path}`")]
+    InvalidWriteTarget { path: PathBuf },
+
+    #[error("failed to atomically write file `{path}`")]
+    AtomicWriteFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::symlink};
+    use std::{fs, os::unix::fs::symlink, path::PathBuf, process::Command};
 
     use tempfile::tempdir;
 
-    use super::{PathKind, path_kind};
+    use crate::infrastructure::filesystem::atomic_write_file;
+
+    use super::{FileSystemError, PathKind, copy_dir, path_kind};
 
     #[test]
     fn path_kind_identifies_regular_file() {
@@ -307,5 +371,252 @@ mod tests {
         let kind = path_kind(&path).unwrap();
 
         assert_eq!(kind, None);
+    }
+
+    #[test]
+    fn copy_dir_preserves_relative_symlink() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("target.txt"), "content").unwrap();
+
+        symlink("target.txt", source.join("link.txt")).unwrap();
+
+        copy_dir(&source, &destination).unwrap();
+
+        let copied_link = destination.join("link.txt");
+
+        assert!(
+            fs::symlink_metadata(&copied_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        assert_eq!(
+            fs::read_link(&copied_link).unwrap(),
+            PathBuf::from("target.txt")
+        );
+
+        assert_eq!(fs::read_to_string(&copied_link).unwrap(), "content");
+    }
+
+    #[test]
+    fn copy_dir_preserves_absolute_symlink() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        let target = temp.path().join("target.txt");
+
+        fs::create_dir(&source).unwrap();
+        fs::write(&target, "content").unwrap();
+
+        symlink(&target, source.join("link.txt")).unwrap();
+
+        copy_dir(&source, &destination).unwrap();
+
+        let copied_link = destination.join("link.txt");
+
+        assert!(
+            fs::symlink_metadata(&copied_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        assert_eq!(fs::read_link(&copied_link).unwrap(), target);
+    }
+
+    #[test]
+    fn copy_dir_preserves_symlink_to_directory() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(source.join("actual")).unwrap();
+        fs::write(source.join("actual").join("file.txt"), "content").unwrap();
+
+        symlink("actual", source.join("linked")).unwrap();
+
+        copy_dir(&source, &destination).unwrap();
+
+        let copied_link = destination.join("linked");
+
+        assert!(
+            fs::symlink_metadata(&copied_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        assert_eq!(
+            fs::read_link(&copied_link).unwrap(),
+            PathBuf::from("actual")
+        );
+
+        assert_eq!(
+            fs::read_to_string(copied_link.join("file.txt")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn copy_dir_preserves_broken_symlink() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+
+        fs::create_dir(&source).unwrap();
+
+        symlink("does-not-exist", source.join("broken")).unwrap();
+
+        copy_dir(&source, &destination).unwrap();
+
+        let copied_link = destination.join("broken");
+
+        assert!(
+            fs::symlink_metadata(&copied_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        assert_eq!(
+            fs::read_link(&copied_link).unwrap(),
+            PathBuf::from("does-not-exist")
+        );
+
+        assert!(!copied_link.exists());
+    }
+
+    #[test]
+    fn copy_dir_removes_partial_destination_when_copy_fails() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file.txt"), "content").unwrap();
+
+        let unsupported = source.join("unsupported");
+
+        let status = Command::new("mkfifo").arg(&unsupported).status().unwrap();
+
+        assert!(status.success());
+
+        let result = copy_dir(&source, &destination);
+
+        assert!(matches!(result, Err(FileSystemError::CopyDirectory { .. })));
+
+        assert!(
+            !destination.exists(),
+            "partial destination should be removed after copy failure"
+        );
+    }
+
+    #[test]
+    fn atomic_write_file_creates_missing_file() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+
+        atomic_write_file(&path, b"content").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"content");
+    }
+
+    #[test]
+    fn atomic_write_file_replaces_existing_file() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+
+        fs::write(&path, b"old content").unwrap();
+
+        atomic_write_file(&path, b"new content").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new content");
+    }
+
+    #[test]
+    fn atomic_write_file_does_not_leave_temporary_file() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+
+        atomic_write_file(&path, b"content").unwrap();
+
+        let entries: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+
+        assert_eq!(entries, vec![path]);
+    }
+
+    #[test]
+    fn atomic_write_file_rejects_missing_parent_directory() {
+        let temp = tempdir().unwrap();
+
+        let path = temp.path().join("missing").join("config.toml");
+
+        let result = atomic_write_file(&path, b"content");
+
+        assert!(matches!(
+            result,
+            Err(FileSystemError::AtomicWriteFile {
+                path: error_path,
+                ..
+            }) if error_path == path
+        ));
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn atomic_write_file_rejects_directory_as_destination() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+
+        fs::create_dir(&path).unwrap();
+
+        let result = atomic_write_file(&path, b"content");
+
+        assert!(matches!(
+            result,
+            Err(FileSystemError::AtomicWriteFile {
+                path: error_path,
+                ..
+            }) if error_path == path
+        ));
+
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn atomic_write_file_preserves_existing_file_when_replacement_fails() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+
+        fs::write(&path, b"original").unwrap();
+
+        let mut permissions = fs::metadata(temp.path()).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(temp.path(), permissions).unwrap();
+
+        let result = atomic_write_file(&path, b"replacement");
+
+        let mut permissions = fs::metadata(temp.path()).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(temp.path(), permissions).unwrap();
+
+        assert!(result.is_err());
+
+        assert_eq!(fs::read(&path).unwrap(), b"original");
     }
 }

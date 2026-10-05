@@ -4,7 +4,7 @@ use crate::{
     application::{Plan, PlanExecutionError, PlanExecutor},
     domain::{BackupRoot, ConfigRoot},
     infrastructure::{
-        filesystem::{DottyLayout, FileSystemAction},
+        filesystem::{DottyLayout, DottyLayoutError, FileSystemAction},
         persistence::{
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
@@ -17,7 +17,7 @@ pub fn execute(repo_dir: PathBuf) -> Result<(), InitError> {
     let paths = DottyPaths::discover()?;
     let layout = DottyLayout::new(&paths);
 
-    if layout.is_initialized() {
+    if layout.is_initialized()? {
         return Err(InitError::AlreadyInit);
     }
 
@@ -36,7 +36,7 @@ fn build_plan(
     let config_repository = ConfigRepository::new(paths.config_file());
     let backups_repository = BackupRepository::new(paths.backup_file());
 
-    let mut plan = layout.initialization_plan(repo_dir);
+    let mut plan = layout.initialization_plan(repo_dir)?;
 
     let config = ConfigRoot::new(repo_dir.to_path_buf());
     let backups = BackupRoot::new();
@@ -65,6 +65,8 @@ pub enum InitError {
     Config(#[from] ConfigRepositoryError),
     #[error(transparent)]
     Backups(#[from] BackupRepositoryError),
+    #[error(transparent)]
+    Layout(#[from] DottyLayoutError),
 }
 
 #[cfg(test)]
