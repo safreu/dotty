@@ -16,20 +16,13 @@ pub fn execute(target: PathBuf) -> Result<(), ForgetError> {
 
     let mut manager = DotfileManager::load(&paths)?;
 
-    if target.is_dir() || target.is_file() {
-        manager.forget(target)?;
-    } else {
-        return Err(ForgetError::UnknownFileType);
-    }
+    manager.forget(target)?;
 
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgetError {
-    #[error("The filetype is not supported")]
-    UnknownFileType,
-
     #[error(transparent)]
     PathDiscovery(#[from] DottyPathsError),
     #[error(transparent)]

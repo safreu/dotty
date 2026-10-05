@@ -113,6 +113,41 @@ fn copy_dir_inner(from: &Path, to: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+pub fn path_kind(path: &Path) -> Result<Option<PathKind>, FileSystemError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+
+        Err(source) => {
+            return Err(FileSystemError::InspectPath {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    let file_type = metadata.file_type();
+
+    if file_type.is_symlink() {
+        Ok(Some(PathKind::Symlink))
+    } else if file_type.is_file() {
+        Ok(Some(PathKind::File))
+    } else if file_type.is_dir() {
+        Ok(Some(PathKind::Directory))
+    } else {
+        Ok(Some(PathKind::Other))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FileSystemError {
     #[error("failed to rename `{from}` to `{to}`")]
@@ -194,4 +229,83 @@ pub enum FileSystemError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("failed to inspect path `{path}`")]
+    InspectPath {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, os::unix::fs::symlink};
+
+    use tempfile::tempdir;
+
+    use super::{PathKind, path_kind};
+
+    #[test]
+    fn path_kind_identifies_regular_file() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("file");
+
+        fs::write(&path, "content").unwrap();
+
+        let kind = path_kind(&path).unwrap();
+
+        assert_eq!(kind, Some(PathKind::File));
+    }
+
+    #[test]
+    fn path_kind_identifies_directory() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("directory");
+
+        fs::create_dir(&path).unwrap();
+
+        let kind = path_kind(&path).unwrap();
+
+        assert_eq!(kind, Some(PathKind::Directory));
+    }
+
+    #[test]
+    fn path_kind_identifies_symlink() {
+        let temp = tempdir().unwrap();
+
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+
+        fs::write(&target, "content").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let kind = path_kind(&link).unwrap();
+
+        assert_eq!(kind, Some(PathKind::Symlink));
+    }
+
+    #[test]
+    fn path_kind_identifies_broken_symlink() {
+        let temp = tempdir().unwrap();
+
+        let target = temp.path().join("missing-target");
+        let link = temp.path().join("link");
+
+        symlink(&target, &link).unwrap();
+
+        let kind = path_kind(&link).unwrap();
+
+        assert_eq!(kind, Some(PathKind::Symlink));
+    }
+
+    #[test]
+    fn path_kind_returns_none_for_missing_path() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("missing");
+
+        let kind = path_kind(&path).unwrap();
+
+        assert_eq!(kind, None);
+    }
 }

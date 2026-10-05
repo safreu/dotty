@@ -9,7 +9,9 @@ use crate::{
         BackupEntry, BackupKind, BackupRoot, ConfigRoot, EntryKind, ManagedEntry, ManagedEntryError,
     },
     infrastructure::{
-        filesystem::{BackupStorage, BackupStorageError, FileSystemAction},
+        filesystem::{
+            self, BackupStorage, BackupStorageError, FileSystemAction, FileSystemError, PathKind,
+        },
         persistence::{
             backup::{BackupRepository, BackupRepositoryError},
             config::{ConfigRepository, ConfigRepositoryError},
@@ -63,11 +65,15 @@ impl DotfileManager {
         })
     }
 
-    pub fn manage(
-        &mut self,
-        target: PathBuf,
-        entry_kind: EntryKind,
-    ) -> Result<(), DotfileManagerError> {
+    pub fn manage(&mut self, target: PathBuf) -> Result<(), DotfileManagerError> {
+        let entry_kind = match filesystem::path_kind(&target)? {
+            Some(PathKind::File) => EntryKind::File,
+            Some(PathKind::Directory) => EntryKind::Dir,
+            Some(PathKind::Symlink | PathKind::Other) | None => {
+                return Err(DotfileManagerError::UnsupportedTarget(target));
+            }
+        };
+
         let (plan, config, backups) = self.build_manage_plan(&target, entry_kind)?;
 
         PlanExecutor::execute(plan)?;
@@ -140,8 +146,9 @@ impl DotfileManager {
     }
 
     pub fn forget(&mut self, target: PathBuf) -> Result<(), DotfileManagerError> {
-        if !target.is_symlink() {
-            return Err(DotfileManagerError::Unmanaged(target.clone()));
+        match filesystem::path_kind(&target)? {
+            Some(PathKind::Symlink) => {}
+            _ => return Err(DotfileManagerError::NotSymlink(target.to_path_buf())),
         }
 
         let (plan, config, backups) = self.build_forget_plan(&target)?;
@@ -222,6 +229,12 @@ pub enum DotfileManagerError {
     BackupStorage(#[from] BackupStorageError),
     #[error(transparent)]
     PlanExecution(#[from] PlanExecutionError),
+    #[error("This target is not a symlink: `{0}`")]
+    NotSymlink(PathBuf),
+    #[error(transparent)]
+    FileSystem(#[from] FileSystemError),
+    #[error("target cannot be managed: `{0}`")]
+    UnsupportedTarget(PathBuf),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -332,7 +345,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let stored = ctx.dotfiles_dir.join("zshrc");
 
@@ -347,7 +360,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         assert!(target.is_symlink());
 
@@ -363,7 +376,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let config = ctx.read_config();
 
@@ -383,7 +396,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target, EntryKind::File).unwrap();
+        manager.manage(target).unwrap();
 
         let backup = ctx.link_backup("zshrc");
 
@@ -398,7 +411,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let backups = ctx.read_backups();
 
@@ -447,7 +460,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target.clone()).unwrap();
 
@@ -464,7 +477,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let stored = ctx.dotfiles_dir.join("zshrc");
 
@@ -482,7 +495,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target).unwrap();
 
@@ -498,7 +511,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target).unwrap();
 
@@ -515,7 +528,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target.clone()).unwrap();
 
@@ -534,7 +547,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         let stored = ctx.dotfiles_dir.join("zshrc");
 
@@ -574,7 +587,7 @@ mod tests {
 
         let target = ctx.create_file(".zshrc", "hello");
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         manager.forget(target).unwrap();
 
@@ -593,7 +606,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(DotfileManagerError::Unmanaged(path))
+            Err(DotfileManagerError::NotSymlink(path))
                 if path == target
         ));
     }
@@ -607,7 +620,7 @@ mod tests {
 
         let original = fs::read_to_string(&target).unwrap();
 
-        manager.manage(target.clone(), EntryKind::File).unwrap();
+        manager.manage(target.clone()).unwrap();
 
         assert!(target.is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), original);
@@ -616,5 +629,63 @@ mod tests {
 
         assert!(!target.is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    }
+
+    #[test]
+    fn manage_directory_detects_directory_kind() {
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let target = ctx.temp.path().join(".config");
+        fs::create_dir(&target).unwrap();
+
+        manager.manage(target.clone()).unwrap();
+
+        let config = ctx.read_config();
+
+        let entry = config
+            .manages()
+            .iter()
+            .find(|entry| entry.points_to() == &target)
+            .unwrap();
+
+        assert_eq!(entry.kind(), &EntryKind::Dir);
+    }
+
+    #[test]
+    fn manage_symlink_returns_unsupported_target_error() {
+        use std::os::unix::fs::symlink;
+
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let destination = ctx.create_file("actual-file", "hello");
+        let target = ctx.temp.path().join("link");
+
+        symlink(destination, &target).unwrap();
+
+        let result = manager.manage(target.clone());
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::UnsupportedTarget(path))
+                if path == target
+        ));
+    }
+
+    #[test]
+    fn manage_missing_target_returns_unsupported_target_error() {
+        let ctx = TestContext::new();
+        let mut manager = ctx.manager();
+
+        let target = ctx.temp.path().join("does-not-exist");
+
+        let result = manager.manage(target.clone());
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::UnsupportedTarget(path))
+                if path == target
+        ));
     }
 }
