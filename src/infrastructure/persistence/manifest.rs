@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    domain::ManifestRoot,
+    domain::{ManifestRoot, ManifestRootError},
     infrastructure::persistence::{self, PreparedWrite, TomlError},
 };
 
@@ -17,7 +17,12 @@ impl ManifestRepository {
     }
 
     pub fn read(&self) -> Result<ManifestRoot, ManifestRepositoryError> {
-        persistence::read_toml(&self.path).map_err(ManifestRepositoryError::Read)
+        let manifest: ManifestRoot =
+            persistence::read_toml(&self.path).map_err(ManifestRepositoryError::Read)?;
+
+        manifest.validate()?;
+
+        Ok(manifest)
     }
 
     #[allow(unused)]
@@ -42,4 +47,6 @@ pub enum ManifestRepositoryError {
     Read(#[source] TomlError),
     #[error("Failed to persist manifest.toml")]
     Write(#[source] TomlError),
+    #[error(transparent)]
+    InvalidManifest(#[from] ManifestRootError),
 }

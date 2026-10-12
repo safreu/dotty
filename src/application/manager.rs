@@ -4,7 +4,7 @@ use crate::{
     application::{Plan, PlanExecutionError, PlanExecutor},
     domain::{
         BackupEntry, BackupKind, BackupRoot, ConfigRoot, ConfigRootError, EntryKind, ManagedEntry,
-        ManagedSource, ManagedTarget, ManifestRoot,
+        ManagedSource, ManagedTarget, ManifestRoot, ManifestRootError,
     },
     infrastructure::{
         filesystem::{
@@ -127,7 +127,7 @@ impl DotfileManager {
             }
         };
 
-        manifest.manages_mut().insert(managed_entry.clone());
+        manifest.add(managed_entry.clone())?;
 
         let mut plan = Plan::new();
 
@@ -217,7 +217,7 @@ impl DotfileManager {
 
         backup_entry.backups_mut().insert(BackupKind::Unlink);
 
-        manifest.manages_mut().remove(&managed_entry);
+        manifest.remove(&managed_entry);
 
         let source = self.config.resolve_source(managed_entry.source());
         let target = self.config.resolve_target(managed_entry.target());
@@ -286,6 +286,8 @@ pub enum DotfileManagerError {
     ConfigRoot(#[from] ConfigRootError),
     #[error(transparent)]
     RepositoryLayout(#[from] RepositoryLayoutError),
+    #[error(transparent)]
+    ManifestRoot(#[from] ManifestRootError),
 }
 
 #[derive(Debug, thiserror::Error)]
