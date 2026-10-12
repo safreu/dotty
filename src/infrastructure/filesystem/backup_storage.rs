@@ -1,8 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{
-    domain::{BackupKind, EntryKind, ManagedEntry},
-    infrastructure::filesystem::{self, FileSystemAction, FileSystemError, PathKind},
+    domain::{BackupKind, EntryKind, ManagedSource},
+    infrastructure::filesystem::{self, FileSystemAction, FileSystemError},
 };
 
 pub struct BackupStorage {
@@ -16,45 +16,39 @@ impl BackupStorage {
 
     pub fn backup_actions(
         &self,
-        entry: &ManagedEntry,
+        from: &Path,
+        managed_source: &ManagedSource,
+        entry_kind: &EntryKind,
         backup_kind: BackupKind,
     ) -> Result<Vec<FileSystemAction>, BackupStorageError> {
-        let backup_dir = self.root.join(entry.managed_filename());
+        let backup_dir = self.root.join(managed_source.path());
 
-        let suffix = match backup_kind {
-            BackupKind::Link => "link",
-            BackupKind::Unlink => "unlink",
+        let destination = match backup_kind {
+            BackupKind::Link => backup_dir.join("link"),
+            BackupKind::Unlink => backup_dir.join("unlink"),
         };
-
-        let source = match backup_kind {
-            BackupKind::Link => entry.points_to(),
-            BackupKind::Unlink => entry.stored_at(),
-        };
-
-        let destination = backup_dir.join(format!("{}.bak.{suffix}", entry.managed_filename()));
 
         let mut actions = Vec::new();
 
-        match filesystem::path_kind(&backup_dir)? {
-            None => actions.push(FileSystemAction::CreateDirectory(backup_dir.clone())),
-            Some(PathKind::Directory) => {}
-            Some(_) => return Err(BackupStorageError::InvalidBackupDirectory(backup_dir)),
-        }
+        let missing = filesystem::missing_directories(&self.root, &backup_dir)?;
 
+        for directory in missing {
+            actions.push(FileSystemAction::CreateDirectory(directory));
+        }
         if filesystem::path_kind(&destination)?.is_some() {
             return Err(BackupStorageError::AlreadyExists(destination));
         }
 
-        match entry.kind() {
+        match entry_kind {
             EntryKind::File => {
                 actions.push(FileSystemAction::CopyFile {
-                    from: source.to_path_buf(),
+                    from: from.to_path_buf(),
                     to: destination,
                 });
             }
             EntryKind::Dir => {
                 actions.push(FileSystemAction::CopyDirectory {
-                    from: source.to_path_buf(),
+                    from: from.to_path_buf(),
                     to: destination,
                 });
             }
@@ -68,8 +62,6 @@ impl BackupStorage {
 pub enum BackupStorageError {
     #[error("backup destination already exists: {0}")]
     AlreadyExists(PathBuf),
-    #[error("backup directory is not a directory: `{0}`")]
-    InvalidBackupDirectory(PathBuf),
     #[error(transparent)]
     FileSystem(#[from] FileSystemError),
 }
@@ -85,8 +77,8 @@ mod tests {
     struct TestContext {
         _temp: TempDir,
         backup_root: PathBuf,
-        repo_dir: PathBuf,
         target: PathBuf,
+        managed_source: ManagedSource,
     }
 
     impl TestContext {
@@ -94,18 +86,18 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
 
             let backup_root = temp.path().join("backups");
-            let repo_dir = temp.path().join("repo");
             let target = temp.path().join(".zshrc");
 
             fs::create_dir(&backup_root).unwrap();
-            fs::create_dir(&repo_dir).unwrap();
             fs::write(&target, "hello").unwrap();
+
+            let managed_source = ManagedSource::new(PathBuf::from("zshrc")).unwrap();
 
             Self {
                 _temp: temp,
                 backup_root,
-                repo_dir,
                 target,
+                managed_source,
             }
         }
 
@@ -113,16 +105,24 @@ mod tests {
             BackupStorage::new(self.backup_root.clone())
         }
 
-        fn entry(&self) -> ManagedEntry {
-            ManagedEntry::new(&self.target, &self.repo_dir, &EntryKind::File).unwrap()
-        }
-
         fn entry_backup_dir(&self) -> PathBuf {
             self.backup_root.join("zshrc")
         }
 
         fn link_backup(&self) -> PathBuf {
-            self.entry_backup_dir().join("zshrc.bak.link")
+            self.entry_backup_dir().join("link")
+        }
+
+        fn backup_actions(
+            &self,
+            storage: &BackupStorage,
+        ) -> Result<Vec<FileSystemAction>, BackupStorageError> {
+            storage.backup_actions(
+                &self.target,
+                &self.managed_source,
+                &EntryKind::File,
+                BackupKind::Link,
+            )
         }
     }
 
@@ -130,9 +130,8 @@ mod tests {
     fn backup_actions_creates_missing_backup_directory() {
         let ctx = TestContext::new();
         let storage = ctx.storage();
-        let entry = ctx.entry();
 
-        let actions = storage.backup_actions(&entry, BackupKind::Link).unwrap();
+        let actions = ctx.backup_actions(&storage).unwrap();
 
         assert!(actions.contains(&FileSystemAction::CreateDirectory(ctx.entry_backup_dir())));
     }
@@ -141,11 +140,10 @@ mod tests {
     fn backup_actions_reuses_existing_backup_directory() {
         let ctx = TestContext::new();
         let storage = ctx.storage();
-        let entry = ctx.entry();
 
         fs::create_dir(ctx.entry_backup_dir()).unwrap();
 
-        let actions = storage.backup_actions(&entry, BackupKind::Link).unwrap();
+        let actions = ctx.backup_actions(&storage).unwrap();
 
         assert!(!actions.contains(&FileSystemAction::CreateDirectory(ctx.entry_backup_dir())));
     }
@@ -154,16 +152,16 @@ mod tests {
     fn backup_actions_rejects_file_as_backup_directory() {
         let ctx = TestContext::new();
         let storage = ctx.storage();
-        let entry = ctx.entry();
 
         fs::write(ctx.entry_backup_dir(), "not a directory").unwrap();
 
-        let result = storage.backup_actions(&entry, BackupKind::Link);
+        let result = ctx.backup_actions(&storage);
 
         assert!(matches!(
             result,
-            Err(BackupStorageError::InvalidBackupDirectory(path))
-                if path == ctx.entry_backup_dir()
+            Err(BackupStorageError::FileSystem(
+                FileSystemError::InvalidDirectory { path }
+            )) if path == ctx.entry_backup_dir()
         ));
     }
 
@@ -171,12 +169,11 @@ mod tests {
     fn backup_actions_rejects_existing_destination() {
         let ctx = TestContext::new();
         let storage = ctx.storage();
-        let entry = ctx.entry();
 
         fs::create_dir(ctx.entry_backup_dir()).unwrap();
         fs::write(ctx.link_backup(), "existing backup").unwrap();
 
-        let result = storage.backup_actions(&entry, BackupKind::Link);
+        let result = ctx.backup_actions(&storage);
 
         assert!(matches!(
             result,
@@ -189,14 +186,14 @@ mod tests {
     fn backup_actions_rejects_broken_symlink_as_destination() {
         let ctx = TestContext::new();
         let storage = ctx.storage();
-        let entry = ctx.entry();
 
         fs::create_dir(ctx.entry_backup_dir()).unwrap();
 
         let missing_target = ctx.backup_root.join("does-not-exist");
+
         symlink(missing_target, ctx.link_backup()).unwrap();
 
-        let result = storage.backup_actions(&entry, BackupKind::Link);
+        let result = ctx.backup_actions(&storage);
 
         assert!(matches!(
             result,

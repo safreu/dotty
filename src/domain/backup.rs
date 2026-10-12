@@ -1,15 +1,12 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::EntryKind;
+use crate::domain::{EntryKind, ManagedSource};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupRoot {
-    backups: HashMap<PathBuf, BackupEntry>,
+    backups: HashMap<ManagedSource, BackupEntry>,
 }
 
 impl BackupRoot {
@@ -19,12 +16,12 @@ impl BackupRoot {
         }
     }
 
-    pub fn backups_mut(&mut self) -> &mut HashMap<PathBuf, BackupEntry> {
+    pub fn backups_mut(&mut self) -> &mut HashMap<ManagedSource, BackupEntry> {
         &mut self.backups
     }
 
     #[allow(unused)]
-    pub fn backups(&self) -> &HashMap<PathBuf, BackupEntry> {
+    pub fn backups(&self) -> &HashMap<ManagedSource, BackupEntry> {
         &self.backups
     }
 }

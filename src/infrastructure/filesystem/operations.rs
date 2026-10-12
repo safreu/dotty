@@ -206,6 +206,39 @@ pub fn path_kind(path: &Path) -> Result<Option<PathKind>, FileSystemError> {
     }
 }
 
+pub fn missing_directories(root: &Path, target: &Path) -> Result<Vec<PathBuf>, FileSystemError> {
+    let mut current = root.to_path_buf();
+    let mut missing = Vec::new();
+
+    match path_kind(root)? {
+        Some(PathKind::Directory) => {}
+        _ => {
+            return Err(FileSystemError::InvalidDirectory {
+                path: root.to_path_buf(),
+            });
+        }
+    };
+
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| FileSystemError::PathOutsideRoot {
+            root: root.to_path_buf(),
+            target: target.to_path_buf(),
+        })?;
+
+    for component in relative.components() {
+        current.push(component);
+
+        match path_kind(&current)? {
+            Some(PathKind::Directory) => {}
+            None => missing.push(current.clone()),
+            Some(_) => return Err(FileSystemError::InvalidDirectory { path: current }),
+        }
+    }
+
+    Ok(missing)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FileSystemError {
     #[error("failed to rename `{from}` to `{to}`")]
@@ -298,6 +331,12 @@ pub enum FileSystemError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("expected directory at `{path}`")]
+    InvalidDirectory { path: PathBuf },
+
+    #[error("path `{target}` is outside root `{root}`")]
+    PathOutsideRoot { root: PathBuf, target: PathBuf },
 }
 
 #[cfg(test)]

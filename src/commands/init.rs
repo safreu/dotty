@@ -52,7 +52,7 @@ fn build_plan(
 
     plan.extend(repository_plan);
 
-    let config = ConfigRoot::new(repo_dir.to_path_buf());
+    let config = ConfigRoot::new(repo_dir.to_path_buf(), paths.home_dir().to_path_buf());
     let backups = BackupRoot::new();
     let manifest = ManifestRoot::new();
 
@@ -106,6 +106,7 @@ mod tests {
         config_dir: PathBuf,
         storage_dir: PathBuf,
         repo_dir: PathBuf,
+        home_dir: PathBuf,
         paths: DottyPaths,
     }
 
@@ -116,14 +117,16 @@ mod tests {
             let config_dir = temp.path().join("config");
             let storage_dir = temp.path().join("storage");
             let repo_dir = temp.path().join("repo");
+            let home_dir = temp.path().join("home");
 
-            let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
+            let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone(), home_dir.clone());
 
             Self {
                 _temp: temp,
                 config_dir,
                 storage_dir,
                 repo_dir,
+                home_dir,
                 paths,
             }
         }
@@ -200,7 +203,8 @@ mod tests {
 
         let config = repository.read().unwrap();
 
-        assert_eq!(config.repo_dir(), &context.repo_dir);
+        assert_eq!(config.repo_dir(), context.repo_dir.as_path());
+        assert_eq!(config.home_dir(), context.home_dir.as_path());
     }
 
     #[test]

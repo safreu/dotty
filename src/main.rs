@@ -32,6 +32,9 @@ enum Commands {
     Manage {
         #[arg(long)]
         target: PathBuf,
+
+        #[arg(long = "as")]
+        source: PathBuf,
     },
 
     Forget {
@@ -48,7 +51,7 @@ fn main() {
             Ok(_) => println!("Init success"),
             Err(e) => println!("Failed with {}", e),
         },
-        Commands::Manage { target } => match manage::execute(target) {
+        Commands::Manage { target, source } => match manage::execute(target, source) {
             Ok(_) => println!("manage success"),
             Err(e) => println!("Failed with {}", e),
         },

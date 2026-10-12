@@ -84,8 +84,9 @@ mod tests {
 
             let config_dir = temp_dir.path().join("config");
             let storage_dir = temp_dir.path().join("storage");
+            let home_dir = temp_dir.path().join("home");
 
-            let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone());
+            let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone(), home_dir.clone());
 
             Self {
                 temp_dir,
