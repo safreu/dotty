@@ -1,8 +1,8 @@
 mod operations;
 pub use operations::{
     FileSystemError, PathKind, atomic_write_file, copy_dir, copy_file, create_dir, create_symlink,
-    path_kind, read_file, read_symlink, remove_dir, remove_dir_all, remove_file, remove_symlink,
-    rename,
+    missing_directories, path_kind, read_file, read_symlink, remove_dir, remove_dir_all,
+    remove_file, remove_symlink, rename,
 };
 
 mod backup_storage;
@@ -13,3 +13,6 @@ pub use layout::{DottyLayout, DottyLayoutError};
 
 mod action;
 pub use action::{Action, ActionError, FileSystemAction};
+
+mod repository_layout;
+pub use repository_layout::{RepositoryLayout, RepositoryLayoutError};
