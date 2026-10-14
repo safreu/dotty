@@ -5,7 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{EntryKind, ManagedEntry};
+use crate::domain::ManagedEntry;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ManifestRoot {
@@ -24,28 +24,22 @@ impl ManifestRoot {
     }
 
     pub fn add(&mut self, entry: ManagedEntry) -> Result<(), ManifestRootError> {
-        if let Some(existing) = self.manages.iter().find(|existing| {
-            Self::paths_conflict(
-                existing.target().path(),
-                existing.kind(),
-                entry.target().path(),
-                entry.kind(),
-            )
-        }) {
+        if let Some(existing) = self
+            .manages
+            .iter()
+            .find(|existing| Self::paths_conflict(existing.target().path(), entry.target().path()))
+        {
             return Err(ManifestRootError::TargetConflict {
                 existing: existing.target().path().to_path_buf(),
                 new: entry.target().path().to_path_buf(),
             });
         }
 
-        if let Some(existing) = self.manages.iter().find(|existing| {
-            Self::paths_conflict(
-                existing.source().path(),
-                existing.kind(),
-                entry.source().path(),
-                entry.kind(),
-            )
-        }) {
+        if let Some(existing) = self
+            .manages
+            .iter()
+            .find(|existing| Self::paths_conflict(existing.source().path(), entry.source().path()))
+        {
             return Err(ManifestRootError::SourceConflict {
                 existing: existing.source().path().to_path_buf(),
                 new: entry.source().path().to_path_buf(),
@@ -57,15 +51,8 @@ impl ManifestRoot {
         Ok(())
     }
 
-    fn paths_conflict(
-        existing: &Path,
-        existing_kind: &EntryKind,
-        new: &Path,
-        new_kind: &EntryKind,
-    ) -> bool {
-        existing == new
-            || (matches!(existing_kind, EntryKind::Dir) && new.starts_with(existing))
-            || (matches!(new_kind, EntryKind::Dir) && existing.starts_with(new))
+    fn paths_conflict(existing: &Path, new: &Path) -> bool {
+        existing.starts_with(new) || new.starts_with(existing)
     }
 
     pub fn remove(&mut self, entry: &ManagedEntry) -> bool {
@@ -620,5 +607,117 @@ mod tests {
         let result = repository.read();
 
         assert!(matches!(result, Err(ManifestRepositoryError::Read(_))));
+    }
+
+    #[test]
+    fn add_rejects_existing_file_containing_new_target() {
+        let mut manifest = ManifestRoot::new();
+
+        let existing = entry("ghostty/config", ".config/ghostty", EntryKind::File);
+
+        let conflicting = entry("other/config", ".config/ghostty/config", EntryKind::File);
+
+        manifest.add(existing.clone()).unwrap();
+
+        let result = manifest.add(conflicting.clone());
+
+        assert!(matches!(
+            result,
+            Err(ManifestRootError::TargetConflict { existing, new })
+                if existing == *".config/ghostty"
+                    && new == *".config/ghostty/config"
+        ));
+
+        assert_eq!(manifest.manages().len(), 1);
+        assert!(manifest.manages().contains(&existing));
+        assert!(!manifest.manages().contains(&conflicting));
+    }
+
+    #[test]
+    fn add_rejects_new_file_containing_existing_target() {
+        let mut manifest = ManifestRoot::new();
+
+        let existing = entry("ghostty/config", ".config/ghostty/config", EntryKind::File);
+
+        let conflicting = entry("other/config", ".config/ghostty", EntryKind::File);
+
+        manifest.add(existing.clone()).unwrap();
+
+        let result = manifest.add(conflicting.clone());
+
+        assert!(matches!(
+            result,
+            Err(ManifestRootError::TargetConflict { existing, new })
+                if existing == *".config/ghostty/config"
+                    && new == *".config/ghostty"
+        ));
+
+        assert_eq!(manifest.manages().len(), 1);
+        assert!(manifest.manages().contains(&existing));
+        assert!(!manifest.manages().contains(&conflicting));
+    }
+
+    #[test]
+    fn add_rejects_existing_file_containing_new_source() {
+        let mut manifest = ManifestRoot::new();
+
+        let existing = entry("ghostty", ".config/ghostty", EntryKind::File);
+
+        let conflicting = entry("ghostty/config", ".config/other", EntryKind::File);
+
+        manifest.add(existing.clone()).unwrap();
+
+        let result = manifest.add(conflicting.clone());
+
+        assert!(matches!(
+            result,
+            Err(ManifestRootError::SourceConflict { existing, new })
+                if existing == *"ghostty"
+                    && new == *"ghostty/config"
+        ));
+
+        assert_eq!(manifest.manages().len(), 1);
+        assert!(manifest.manages().contains(&existing));
+        assert!(!manifest.manages().contains(&conflicting));
+    }
+
+    #[test]
+    fn add_rejects_new_file_containing_existing_source() {
+        let mut manifest = ManifestRoot::new();
+
+        let existing = entry("ghostty/config", ".config/ghostty/config", EntryKind::File);
+
+        let conflicting = entry("ghostty", ".config/other", EntryKind::File);
+
+        manifest.add(existing.clone()).unwrap();
+
+        let result = manifest.add(conflicting.clone());
+
+        assert!(matches!(
+            result,
+            Err(ManifestRootError::SourceConflict { existing, new })
+                if existing == *"ghostty/config"
+                    && new == *"ghostty"
+        ));
+
+        assert_eq!(manifest.manages().len(), 1);
+        assert!(manifest.manages().contains(&existing));
+        assert!(!manifest.manages().contains(&conflicting));
+    }
+
+    #[test]
+    fn add_allows_similarly_named_paths() {
+        let mut manifest = ManifestRoot::new();
+
+        let first = entry("ghostty", ".config/ghostty", EntryKind::File);
+
+        let second = entry("ghostty-backup", ".config/ghostty-backup", EntryKind::File);
+
+        manifest.add(first.clone()).unwrap();
+        manifest.add(second.clone()).unwrap();
+
+        assert_eq!(manifest.manages().len(), 2);
+        assert!(manifest.manages().contains(&first));
+        assert!(manifest.manages().contains(&second));
     }
 }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::commands::{completions, forget, init, ls, manage, test};
+use crate::commands::{apply, completions, forget, init, ls, manage, test};
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 
@@ -51,6 +51,7 @@ enum Commands {
         path: Option<PathBuf>,
     },
     Ls,
+    Apply,
 }
 
 fn main() -> std::process::ExitCode {
@@ -100,6 +101,13 @@ fn main() -> std::process::ExitCode {
             }
         },
         Commands::Ls => match ls::execute() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Failed to list managed entries: {error}");
+                std::process::ExitCode::from(2)
+            }
+        },
+        Commands::Apply => match apply::execute() {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("Failed to list managed entries: {error}");

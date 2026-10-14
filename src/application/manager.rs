@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    application::{InspectionError, ManagedEntryInspector, Plan, PlanExecutionError, PlanExecutor},
+    application::{
+        InspectionError, ManagedEntryInspector, Plan, PlanExecutionError, PlanExecutor,
+        apply::{ApplyPlanner, ApplyPlanningError},
+    },
     domain::{
         BackupEntry, BackupId, BackupKind, BackupRoot, BackupRootError, ConfigRoot,
         ConfigRootError, EntryKind, ManagedEntry, ManagedEntryInspection, ManagedSource,
@@ -295,6 +298,25 @@ impl DotfileManager {
             })
             .transpose()
     }
+
+    pub fn apply(&self) -> Result<(), DotfileManagerError> {
+        let plan = self.plan_apply()?;
+
+        PlanExecutor::execute(plan)?;
+
+        Ok(())
+    }
+
+    pub fn plan_apply(&self) -> Result<Plan, DotfileManagerError> {
+        let inspections = self.inspect()?;
+
+        let planner = ApplyPlanner::new(
+            self.config.repo_dir().to_path_buf(),
+            self.config.home_dir().to_path_buf(),
+        );
+
+        Ok(planner.plan(&inspections)?)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -325,6 +347,8 @@ pub enum DotfileManagerError {
     BackupRoot(#[from] BackupRootError),
     #[error(transparent)]
     Inspection(#[from] InspectionError),
+    #[error(transparent)]
+    ApplyPlanning(#[from] ApplyPlanningError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1423,5 +1447,319 @@ mod tests {
         assert_eq!(first[0].issues(), second[0].issues());
 
         assert_eq!(first[0].entry(), second[0].entry());
+    }
+
+    #[test]
+    fn manage_rejects_overlapping_targets_without_modifying_state() {
+        let context = TestContext::new();
+
+        context.create_file(".config/ghostty/config", "original");
+        context.create_file(".config/other", "other content");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".config/ghostty/config", "ghostty/config");
+
+        let manifest_before = fs::read(context.repository_paths.manifest_file()).unwrap();
+
+        let backups_before = fs::read(context.paths.backup_file()).unwrap();
+
+        let snapshots_before = context.snapshot_count();
+
+        let result = manager.manage(
+            context.managed_target(".config/ghostty"),
+            context.managed_source("other/config"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::ManifestRoot(
+                ManifestRootError::TargetConflict { .. }
+            ))
+        ));
+
+        assert_eq!(
+            fs::read(context.repository_paths.manifest_file()).unwrap(),
+            manifest_before
+        );
+
+        assert_eq!(
+            fs::read(context.paths.backup_file()).unwrap(),
+            backups_before
+        );
+
+        assert_eq!(context.snapshot_count(), snapshots_before);
+
+        assert_eq!(
+            fs::read_to_string(context.target(".config/other")).unwrap(),
+            "other content"
+        );
+
+        assert_eq!(
+            fs::read_to_string(context.repo_dir.join("ghostty/config")).unwrap(),
+            "original"
+        );
+
+        assert!(!context.repo_dir.join("other/config").exists());
+        assert_eq!(context.read_manifest().manages().len(), 1);
+    }
+
+    #[test]
+    fn apply_recreates_missing_symlink() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "original content");
+
+        let mut manager = context.manager();
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let target = context.target(".zshrc");
+        let source = context.repo_dir.join("zshrc");
+
+        fs::remove_file(&target).unwrap();
+
+        manager.apply().unwrap();
+
+        assert!(
+            fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        assert_eq!(fs::read_link(&target).unwrap(), source);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original content");
+    }
+
+    #[test]
+    fn apply_recreates_missing_parent_directories() {
+        let context = TestContext::new();
+
+        context.create_file(".config/ghostty/config", "ghostty config");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".config/ghostty/config", "ghostty/config");
+
+        let target = context.target(".config/ghostty/config");
+        let parent = context.target(".config/ghostty");
+
+        fs::remove_file(&target).unwrap();
+        fs::remove_dir(&parent).unwrap();
+
+        manager.apply().unwrap();
+
+        assert!(parent.is_dir());
+
+        assert!(
+            fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        assert_eq!(
+            fs::read_link(&target).unwrap(),
+            context.repo_dir.join("ghostty/config")
+        );
+    }
+
+    #[test]
+    fn apply_is_idempotent_for_healthy_entries() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "original content");
+
+        let mut manager = context.manager();
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let target = context.target(".zshrc");
+        let source = context.repo_dir.join("zshrc");
+
+        let manifest_before = fs::read(context.repository_paths.manifest_file()).unwrap();
+
+        let backups_before = fs::read(context.paths.backup_file()).unwrap();
+
+        let snapshots_before = context.snapshot_count();
+
+        let plan = manager.plan_apply().unwrap();
+
+        assert!(plan.into_actions().is_empty());
+
+        manager.apply().unwrap();
+        manager.apply().unwrap();
+
+        assert_eq!(fs::read_link(&target).unwrap(), source);
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original content");
+
+        assert_eq!(
+            fs::read(context.repository_paths.manifest_file()).unwrap(),
+            manifest_before
+        );
+
+        assert_eq!(
+            fs::read(context.paths.backup_file()).unwrap(),
+            backups_before
+        );
+
+        assert_eq!(context.snapshot_count(), snapshots_before);
+    }
+
+    #[test]
+    fn apply_rejects_conflicting_regular_file() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "original content");
+
+        let mut manager = context.manager();
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let target = context.target(".zshrc");
+
+        fs::remove_file(&target).unwrap();
+        fs::write(&target, "user modified content").unwrap();
+
+        let result = manager.apply();
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::ApplyPlanning(
+                ApplyPlanningError::Entry { .. }
+            ))
+        ));
+
+        assert!(target.is_file());
+
+        assert!(
+            !fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "user modified content"
+        );
+
+        assert_eq!(
+            fs::read_to_string(context.repo_dir.join("zshrc")).unwrap(),
+            "original content"
+        );
+    }
+
+    #[test]
+    fn apply_rejects_missing_source() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "original content");
+
+        let mut manager = context.manager();
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let target = context.target(".zshrc");
+        let source = context.repo_dir.join("zshrc");
+
+        fs::remove_file(&target).unwrap();
+        fs::remove_file(&source).unwrap();
+
+        let result = manager.apply();
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::ApplyPlanning(
+                ApplyPlanningError::Entry { .. }
+            ))
+        ));
+
+        assert!(!target.exists());
+        assert!(!source.exists());
+
+        assert_eq!(context.read_manifest().manages().len(), 1);
+    }
+
+    #[test]
+    fn apply_restores_multiple_missing_symlinks() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "zsh content");
+        context.create_file(".gitconfig", "git content");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+        context.manage(&mut manager, ".gitconfig", "gitconfig");
+
+        let zsh_target = context.target(".zshrc");
+        let git_target = context.target(".gitconfig");
+
+        fs::remove_file(&zsh_target).unwrap();
+        fs::remove_file(&git_target).unwrap();
+
+        manager.apply().unwrap();
+
+        assert_eq!(
+            fs::read_link(&zsh_target).unwrap(),
+            context.repo_dir.join("zshrc")
+        );
+
+        assert_eq!(
+            fs::read_link(&git_target).unwrap(),
+            context.repo_dir.join("gitconfig")
+        );
+
+        assert_eq!(fs::read_to_string(&zsh_target).unwrap(), "zsh content");
+
+        assert_eq!(fs::read_to_string(&git_target).unwrap(), "git content");
+
+        assert_eq!(context.read_manifest().manages().len(), 2);
+    }
+
+    #[test]
+    fn apply_planning_failure_does_not_modify_other_entries() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "zsh content");
+        context.create_file(".gitconfig", "git content");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+        context.manage(&mut manager, ".gitconfig", "gitconfig");
+
+        let zsh_target = context.target(".zshrc");
+        let git_target = context.target(".gitconfig");
+
+        fs::remove_file(&zsh_target).unwrap();
+        fs::remove_file(&git_target).unwrap();
+
+        fs::write(&git_target, "conflicting content").unwrap();
+
+        let result = manager.apply();
+
+        assert!(matches!(
+            result,
+            Err(DotfileManagerError::ApplyPlanning(
+                ApplyPlanningError::Entry { .. }
+            ))
+        ));
+
+        assert!(!zsh_target.exists());
+
+        assert_eq!(
+            fs::read_to_string(&git_target).unwrap(),
+            "conflicting content"
+        );
+
+        assert_eq!(
+            fs::read_to_string(context.repo_dir.join("zshrc")).unwrap(),
+            "zsh content"
+        );
+
+        assert_eq!(
+            fs::read_to_string(context.repo_dir.join("gitconfig")).unwrap(),
+            "git content"
+        );
     }
 }

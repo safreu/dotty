@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use path_clean::PathClean;
 
+pub mod apply;
 pub mod completions;
 pub mod forget;
 pub mod init;
