@@ -93,9 +93,14 @@ pub enum ManifestRootError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::fs;
 
-    use crate::domain::{EntryKind, ManagedEntry, ManagedSource, ManagedTarget};
+    use tempfile::TempDir;
+
+    use crate::{
+        domain::{EntryKind, ManagedEntry, ManagedSource, ManagedTarget},
+        infrastructure::persistence::{ManifestRepository, ManifestRepositoryError},
+    };
 
     use super::{ManifestRoot, ManifestRootError};
 
@@ -162,8 +167,8 @@ mod tests {
             Err(ManifestRootError::TargetConflict {
                 existing,
                 new,
-            }) if existing == PathBuf::from(".config/ghostty/config")
-                && new == PathBuf::from(".config/ghostty/config")
+            }) if existing == *".config/ghostty/config"
+                && new == *".config/ghostty/config"
         ));
 
         assert_eq!(manifest.manages().len(), 1);
@@ -186,8 +191,8 @@ mod tests {
             Err(ManifestRootError::SourceConflict {
                 existing,
                 new,
-            }) if existing == PathBuf::from("ghostty/config")
-                && new == PathBuf::from("ghostty/config")
+            }) if existing == *"ghostty/config"
+                && new == *"ghostty/config"
         ));
 
         assert_eq!(manifest.manages().len(), 1);
@@ -212,8 +217,8 @@ mod tests {
             Err(ManifestRootError::TargetConflict {
                 existing,
                 new,
-            }) if existing == PathBuf::from(".config/ghostty")
-                && new == PathBuf::from(".config/ghostty/config")
+            }) if existing == *".config/ghostty"
+                && new == *".config/ghostty/config"
         ));
 
         assert_eq!(manifest.manages().len(), 1);
@@ -238,8 +243,8 @@ mod tests {
             Err(ManifestRootError::TargetConflict {
                 existing,
                 new,
-            }) if existing == PathBuf::from(".config/ghostty/config")
-                && new == PathBuf::from(".config/ghostty")
+            }) if existing == *".config/ghostty/config"
+                && new == *".config/ghostty"
         ));
 
         assert_eq!(manifest.manages().len(), 1);
@@ -264,8 +269,8 @@ mod tests {
             Err(ManifestRootError::SourceConflict {
                 existing,
                 new,
-            }) if existing == PathBuf::from("ghostty")
-                && new == PathBuf::from("ghostty/config")
+            }) if existing == *"ghostty"
+                && new == *"ghostty/config"
         ));
 
         assert_eq!(manifest.manages().len(), 1);
@@ -290,8 +295,8 @@ mod tests {
             Err(ManifestRootError::SourceConflict {
                 existing,
                 new,
-            }) if existing == PathBuf::from("ghostty/config")
-                && new == PathBuf::from("ghostty")
+            }) if existing == *"ghostty/config"
+                && new == *"ghostty"
         ));
 
         assert_eq!(manifest.manages().len(), 1);
@@ -506,66 +511,47 @@ mod tests {
         assert_eq!(manifest.manages(), &before);
     }
 
-    #[cfg(test)]
-    mod tests {
-        use std::fs;
+    #[test]
+    fn read_accepts_valid_manifest() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("manifest.toml");
 
-        use tempfile::TempDir;
+        let mut manifest = ManifestRoot::new();
 
-        use crate::{
-            domain::{EntryKind, ManagedEntry, ManagedSource, ManagedTarget, ManifestRoot},
-            infrastructure::persistence::{ManifestRepository, ManifestRepositoryError},
-        };
+        let managed = entry("ghostty/config", ".config/ghostty/config", EntryKind::File);
 
-        fn entry(source: &str, target: &str, kind: EntryKind) -> ManagedEntry {
-            ManagedEntry::new(
-                ManagedSource::new(source.into()).unwrap(),
-                ManagedTarget::home_relative(target.into()).unwrap(),
-                kind,
-            )
-        }
+        manifest.add(managed.clone()).unwrap();
 
-        #[test]
-        fn read_accepts_valid_manifest() {
-            let temp = TempDir::new().unwrap();
-            let path = temp.path().join("manifest.toml");
+        let repository = ManifestRepository::new(&path);
 
-            let mut manifest = ManifestRoot::new();
+        repository.write(&manifest).unwrap();
 
-            let managed = entry("ghostty/config", ".config/ghostty/config", EntryKind::File);
+        let loaded = repository.read().unwrap();
 
-            manifest.add(managed.clone()).unwrap();
+        assert_eq!(loaded.manages().len(), 1);
+        assert!(loaded.manages().contains(&managed));
+    }
 
-            let repository = ManifestRepository::new(&path);
+    #[test]
+    fn read_accepts_empty_manifest() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("manifest.toml");
 
-            repository.write(&manifest).unwrap();
+        let repository = ManifestRepository::new(&path);
 
-            let loaded = repository.read().unwrap();
+        repository.write(&ManifestRoot::new()).unwrap();
 
-            assert_eq!(loaded.manages().len(), 1);
-            assert!(loaded.manages().contains(&managed));
-        }
+        let loaded = repository.read().unwrap();
 
-        #[test]
-        fn read_accepts_empty_manifest() {
-            let temp = TempDir::new().unwrap();
-            let path = temp.path().join("manifest.toml");
+        assert!(loaded.manages().is_empty());
+    }
 
-            let repository = ManifestRepository::new(&path);
+    #[test]
+    fn read_rejects_conflicting_targets() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("manifest.toml");
 
-            repository.write(&ManifestRoot::new()).unwrap();
-
-            let loaded = repository.read().unwrap();
-
-            assert!(loaded.manages().is_empty());
-        }
-
-        #[test]
-        fn read_rejects_conflicting_targets() {
-            let temp = TempDir::new().unwrap();
-            let path = temp.path().join("manifest.toml");
-
-            let contents = r#"
+        let contents = r#"
                 [[manages]]
                 source = "ghostty"
                 target = { HomeRelative = ".config/ghostty" }
@@ -577,26 +563,26 @@ mod tests {
                 kind = "File"
             "#;
 
-            fs::write(&path, contents).unwrap();
+        fs::write(&path, contents).unwrap();
 
-            let repository = ManifestRepository::new(&path);
+        let repository = ManifestRepository::new(&path);
 
-            let result = repository.read();
+        let result = repository.read();
 
-            assert!(matches!(
-                result,
-                Err(ManifestRepositoryError::InvalidManifest(
-                    crate::domain::ManifestRootError::TargetConflict { .. }
-                ))
-            ));
-        }
+        assert!(matches!(
+            result,
+            Err(ManifestRepositoryError::InvalidManifest(
+                crate::domain::ManifestRootError::TargetConflict { .. }
+            ))
+        ));
+    }
 
-        #[test]
-        fn read_rejects_conflicting_sources() {
-            let temp = TempDir::new().unwrap();
-            let path = temp.path().join("manifest.toml");
+    #[test]
+    fn read_rejects_conflicting_sources() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("manifest.toml");
 
-            let contents = r#"
+        let contents = r#"
                 [[manages]]
                 source = "ghostty"
                 target = { HomeRelative = ".config/ghostty" }
@@ -608,32 +594,31 @@ mod tests {
                 kind = "File"
             "#;
 
-            fs::write(&path, contents).unwrap();
+        fs::write(&path, contents).unwrap();
 
-            let repository = ManifestRepository::new(&path);
+        let repository = ManifestRepository::new(&path);
 
-            let result = repository.read();
+        let result = repository.read();
 
-            assert!(matches!(
-                result,
-                Err(ManifestRepositoryError::InvalidManifest(
-                    crate::domain::ManifestRootError::SourceConflict { .. }
-                ))
-            ));
-        }
+        assert!(matches!(
+            result,
+            Err(ManifestRepositoryError::InvalidManifest(
+                crate::domain::ManifestRootError::SourceConflict { .. }
+            ))
+        ));
+    }
 
-        #[test]
-        fn read_reports_invalid_toml() {
-            let temp = TempDir::new().unwrap();
-            let path = temp.path().join("manifest.toml");
+    #[test]
+    fn read_reports_invalid_toml() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("manifest.toml");
 
-            fs::write(&path, "this is not valid toml = [").unwrap();
+        fs::write(&path, "this is not valid toml = [").unwrap();
 
-            let repository = ManifestRepository::new(&path);
+        let repository = ManifestRepository::new(&path);
 
-            let result = repository.read();
+        let result = repository.read();
 
-            assert!(matches!(result, Err(ManifestRepositoryError::Read(_))));
-        }
+        assert!(matches!(result, Err(ManifestRepositoryError::Read(_))));
     }
 }

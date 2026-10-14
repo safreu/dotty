@@ -341,7 +341,12 @@ pub enum FileSystemError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::symlink, path::PathBuf, process::Command};
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+        path::PathBuf,
+        process::Command,
+    };
 
     use tempfile::tempdir;
 
@@ -651,7 +656,7 @@ mod tests {
         let result = atomic_write_file(&path, b"replacement");
 
         let mut permissions = fs::metadata(temp.path()).unwrap().permissions();
-        permissions.set_readonly(false);
+        permissions.set_mode(0o600);
         fs::set_permissions(temp.path(), permissions).unwrap();
 
         assert!(result.is_err());
