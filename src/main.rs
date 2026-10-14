@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::commands::{completions, forget, init, manage};
+use crate::commands::{completions, forget, init, manage, test};
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 
@@ -8,6 +8,8 @@ mod application;
 mod commands;
 mod domain;
 mod infrastructure;
+mod presentation;
+
 #[derive(Parser)]
 #[command(name = "dotty", about = "Dotfile management tool")]
 struct Cli {
@@ -27,7 +29,6 @@ enum Commands {
         // This path will be used to store the dotfiles, in case it doesn't exist yet it will be created
         repo_dir_path: PathBuf,
     },
-    // Dotty will manage itself, meaning after init, program will call dotty manage 'self'
     Manage {
         #[arg(long, value_hint = ValueHint::AnyPath)]
         target: PathBuf,
@@ -45,24 +46,55 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    Test,
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Init { repo_dir_path } => match init::execute(repo_dir_path) {
-            Ok(_) => println!("Init success"),
-            Err(e) => println!("Failed with {}", e),
+            Ok(_) => {
+                println!("Init success");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Failed with: {e}");
+                std::process::ExitCode::from(2)
+            }
         },
         Commands::Manage { target, source } => match manage::execute(target, source) {
-            Ok(_) => println!("manage success"),
-            Err(e) => println!("Failed with {}", e),
+            Ok(_) => {
+                println!("manage success");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Failed with: {e}");
+                std::process::ExitCode::from(2)
+            }
         },
         Commands::Forget { target } => match forget::execute(target) {
-            Ok(_) => println!("forget success"),
-            Err(e) => println!("Failed with {}", e),
+            Ok(_) => {
+                println!("forget success");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Failed with: {e}");
+                std::process::ExitCode::from(2)
+            }
         },
-        Commands::Completions { shell } => completions::execute(shell, Cli::command()),
+        Commands::Completions { shell } => {
+            completions::execute(shell, Cli::command());
+            std::process::ExitCode::SUCCESS
+        }
+        Commands::Test => match test::execute() {
+            Ok(true) => std::process::ExitCode::SUCCESS,
+            Ok(false) => std::process::ExitCode::from(1),
+            Err(error) => {
+                eprintln!("Failed to inspect dotfiles: {error}");
+                std::process::ExitCode::from(2)
+            }
+        },
     }
 }
