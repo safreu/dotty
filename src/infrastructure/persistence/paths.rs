@@ -6,13 +6,15 @@ use std::{
 pub struct DottyPaths {
     config_dir: PathBuf,
     storage_dir: PathBuf,
+    home_dir: PathBuf,
 }
 
 impl DottyPaths {
-    pub fn new(config_dir: PathBuf, storage_dir: PathBuf) -> Self {
+    pub fn new(config_dir: PathBuf, storage_dir: PathBuf, home_dir: PathBuf) -> Self {
         Self {
             config_dir,
             storage_dir,
+            home_dir,
         }
     }
 
@@ -36,11 +38,19 @@ impl DottyPaths {
 
         Ok(storage_dir)
     }
+
+    fn discover_home() -> Result<PathBuf, DottyPathsError> {
+        let path = PathBuf::from(env::var("HOME")?);
+
+        Ok(path)
+    }
+
     pub fn discover() -> Result<Self, DottyPathsError> {
         let config_dir = DottyPaths::discover_config_dir()?;
         let storage_dir = DottyPaths::discover_storage_dir()?;
+        let home_dir = DottyPaths::discover_home()?;
 
-        Ok(Self::new(config_dir, storage_dir))
+        Ok(Self::new(config_dir, storage_dir, home_dir))
     }
 
     pub fn config_file(&self) -> PathBuf {
@@ -59,8 +69,12 @@ impl DottyPaths {
         &self.config_dir
     }
 
-    pub fn storage_dir(&self) -> &PathBuf {
+    pub fn storage_dir(&self) -> &Path {
         &self.storage_dir
+    }
+
+    pub fn home_dir(&self) -> &Path {
+        &self.home_dir
     }
 }
 

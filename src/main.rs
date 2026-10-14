@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
-
-use crate::commands::{forget, init, manage};
+use crate::commands::{completions, forget, init, ls, manage, test};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::Shell;
 
 mod application;
 mod commands;
 mod domain;
 mod infrastructure;
+mod presentation;
 
 #[derive(Parser)]
 #[command(name = "dotty", about = "Dotfile management tool")]
@@ -26,35 +27,84 @@ enum Commands {
     Init {
         #[arg(long)]
         // This path will be used to store the dotfiles, in case it doesn't exist yet it will be created
-        dotfiles_dir_path: PathBuf,
+        repo_dir_path: PathBuf,
     },
-    // Dotty will manage itself, meaning after init, program will call dotty manage 'self'
     Manage {
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::AnyPath)]
         target: PathBuf,
+
+        #[arg(long = "as", value_hint = ValueHint::AnyPath)]
+        source: Option<PathBuf>,
     },
 
     Forget {
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::AnyPath)]
         target: PathBuf,
     },
+
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
+    Test {
+        path: Option<PathBuf>,
+    },
+    Ls,
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { dotfiles_dir_path } => match init::execute(dotfiles_dir_path) {
-            Ok(_) => println!("Init success"),
-            Err(e) => println!("Failed with {}", e),
+        Commands::Init { repo_dir_path } => match init::execute(repo_dir_path) {
+            Ok(_) => {
+                println!("Init success");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Failed with: {e}");
+                std::process::ExitCode::from(2)
+            }
         },
-        Commands::Manage { target } => match manage::execute(target) {
-            Ok(_) => println!("manage success"),
-            Err(e) => println!("Failed with {}", e),
+        Commands::Manage { target, source } => match manage::execute(target, source) {
+            Ok(_) => {
+                println!("manage success");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Failed with: {e}");
+                std::process::ExitCode::from(2)
+            }
         },
         Commands::Forget { target } => match forget::execute(target) {
-            Ok(_) => println!("forget success"),
-            Err(e) => println!("Failed with {}", e),
+            Ok(_) => {
+                println!("forget success");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Failed with: {e}");
+                std::process::ExitCode::from(2)
+            }
+        },
+        Commands::Completions { shell } => {
+            completions::execute(shell, Cli::command());
+            std::process::ExitCode::SUCCESS
+        }
+        Commands::Test { path } => match test::execute(path) {
+            Ok(true) => std::process::ExitCode::SUCCESS,
+            Ok(false) => std::process::ExitCode::from(1),
+            Err(error) => {
+                eprintln!("Failed to inspect dotfiles: {error}");
+                std::process::ExitCode::from(2)
+            }
+        },
+        Commands::Ls => match ls::execute() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Failed to list managed entries: {error}");
+                std::process::ExitCode::from(2)
+            }
         },
     }
 }

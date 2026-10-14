@@ -2,9 +2,13 @@ use std::path::PathBuf;
 
 use crate::{
     application::{DotfileManager, DotfileManagerError, DotfileManagerLoadError},
+    domain::ConfigRootError,
     infrastructure::{
         filesystem::{DottyLayout, DottyLayoutError},
-        persistence::paths::{DottyPaths, DottyPathsError},
+        persistence::{
+            config::{ConfigRepository, ConfigRepositoryError},
+            paths::{DottyPaths, DottyPathsError},
+        },
     },
 };
 
@@ -14,9 +18,14 @@ pub fn execute(target: PathBuf) -> Result<(), ForgetError> {
     let layout = DottyLayout::new(&paths);
     layout.require_initialized()?;
 
+    let config_repository = ConfigRepository::new(paths.config_file());
+    let config = config_repository.read()?;
+
+    let managed_target = config.to_managed_target(&target)?;
+
     let mut manager = DotfileManager::load(&paths)?;
 
-    manager.forget(target)?;
+    manager.forget(managed_target)?;
 
     Ok(())
 }
@@ -31,4 +40,8 @@ pub enum ForgetError {
     DotfileManager(#[from] DotfileManagerError),
     #[error(transparent)]
     Layout(#[from] DottyLayoutError),
+    #[error(transparent)]
+    Config(#[from] ConfigRepositoryError),
+    #[error(transparent)]
+    ConfigRoot(#[from] ConfigRootError),
 }

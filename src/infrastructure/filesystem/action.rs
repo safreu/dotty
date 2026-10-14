@@ -43,6 +43,7 @@ pub enum FileSystemAction {
     CopyFile { from: PathBuf, to: PathBuf },
     CopyDirectory { from: PathBuf, to: PathBuf },
     RemoveDirectoryAll(PathBuf),
+    RemoveDirectoryIfEmpty(PathBuf),
 }
 
 impl FileSystemAction {
@@ -58,7 +59,9 @@ impl FileSystemAction {
             FileSystemAction::RemoveDirectory(path) => {
                 filesystem::remove_dir(&path)?;
 
-                Ok(ExecutedFileSystemAction::new(None))
+                Ok(ExecutedFileSystemAction::new(Some(
+                    FileSystemAction::CreateDirectory(path),
+                )))
             }
 
             FileSystemAction::WriteFile { path, contents } => {
@@ -127,6 +130,17 @@ impl FileSystemAction {
 
                 Ok(ExecutedFileSystemAction::new(None))
             }
+            FileSystemAction::RemoveDirectoryIfEmpty(path) => match filesystem::remove_dir(&path) {
+                Ok(()) => Ok(ExecutedFileSystemAction::new(Some(
+                    FileSystemAction::CreateDirectory(path),
+                ))),
+                Err(FileSystemError::RemoveDirectory { source, .. })
+                    if source.kind() == std::io::ErrorKind::DirectoryNotEmpty =>
+                {
+                    Ok(ExecutedFileSystemAction::new(None))
+                }
+                Err(err) => Err(err),
+            },
         }
     }
 }
