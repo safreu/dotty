@@ -47,7 +47,9 @@ enum Commands {
         shell: Shell,
     },
 
-    Test,
+    Test {
+        path: Option<PathBuf>,
+    },
     Ls,
 }
 
@@ -89,7 +91,7 @@ fn main() -> std::process::ExitCode {
             completions::execute(shell, Cli::command());
             std::process::ExitCode::SUCCESS
         }
-        Commands::Test => match test::execute() {
+        Commands::Test { path } => match test::execute(path) {
             Ok(true) => std::process::ExitCode::SUCCESS,
             Ok(false) => std::process::ExitCode::from(1),
             Err(error) => {

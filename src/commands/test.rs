@@ -1,4 +1,7 @@
-use std::io::Write;
+use std::{
+    io::Write,
+    path::{Component, PathBuf},
+};
 
 use crate::{
     application::{DotfileManager, DotfileManagerLoadError, InspectionError},
@@ -7,21 +10,43 @@ use crate::{
     presentation::print_inspections,
 };
 
-pub fn execute() -> Result<bool, TestCommandError> {
+pub fn execute(path: Option<PathBuf>) -> Result<bool, TestCommandError> {
     let paths = DottyPaths::discover()?;
 
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
 
-    execute_with_paths(&paths, &mut writer)
+    execute_with_paths(path, &paths, &mut writer)
 }
 
 fn execute_with_paths(
+    path: Option<PathBuf>,
     paths: &DottyPaths,
     writer: &mut impl Write,
 ) -> Result<bool, TestCommandError> {
     let manager = DotfileManager::load(paths)?;
-    let inspections = manager.inspect()?;
+    let inspections = match path {
+        Some(target) => {
+            let relative = target
+                .strip_prefix(paths.home_dir())
+                .map_err(|_| TestCommandError::InvalidTarget)?;
+
+            if relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+            {
+                return Err(TestCommandError::InvalidTarget);
+            };
+
+            let inspection = manager
+                .inspect_target(relative)?
+                .ok_or(TestCommandError::TargetNotManaged)?;
+
+            vec![inspection]
+        }
+        None => manager.inspect()?,
+    };
 
     print_inspections(writer, &inspections)?;
 
@@ -38,6 +63,10 @@ pub enum TestCommandError {
     DottyPaths(#[from] DottyPathsError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("Target must be inside the home directory")]
+    InvalidTarget,
+    #[error("Target is not managed by Dotty")]
+    TargetNotManaged,
 }
 
 #[cfg(test)]
@@ -84,7 +113,6 @@ mod tests {
             fs::create_dir_all(&home_dir).unwrap();
 
             fs::create_dir_all(paths.config_file().parent().unwrap()).unwrap();
-
             fs::create_dir_all(paths.backup_file().parent().unwrap()).unwrap();
 
             let repository_paths = RepositoryPaths::new(repo_dir.clone());
@@ -145,13 +173,22 @@ mod tests {
         }
 
         fn run(&self) -> (bool, String) {
+            self.run_with_path(None).unwrap()
+        }
+
+        fn run_target(&self, target: &str) -> (bool, String) {
+            self.run_with_path(Some(self.home_dir.join(target)))
+                .unwrap()
+        }
+
+        fn run_with_path(&self, path: Option<PathBuf>) -> Result<(bool, String), TestCommandError> {
             let mut output = Vec::new();
 
-            let healthy = execute_with_paths(&self.paths, &mut output).unwrap();
+            let healthy = execute_with_paths(path, &self.paths, &mut output)?;
 
             let output = String::from_utf8(output).unwrap();
 
-            (healthy, strip_ansi(&output))
+            Ok((healthy, strip_ansi(&output)))
         }
     }
 
@@ -301,7 +338,6 @@ mod tests {
 
         assert!(output.contains("Missing source"));
         assert!(output.contains("Missing target"));
-
         assert!(output.contains("1 healthy, 1 unhealthy"));
     }
 
@@ -334,10 +370,9 @@ mod tests {
 
         let mut output = Vec::new();
 
-        let result = execute_with_paths(&context.paths, &mut output);
+        let result = execute_with_paths(None, &context.paths, &mut output);
 
         assert!(matches!(result, Err(TestCommandError::ManagerLoad(_))));
-
         assert!(output.is_empty());
     }
 
@@ -349,10 +384,9 @@ mod tests {
 
         let mut output = Vec::new();
 
-        let result = execute_with_paths(&context.paths, &mut output);
+        let result = execute_with_paths(None, &context.paths, &mut output);
 
         assert!(matches!(result, Err(TestCommandError::ManagerLoad(_))));
-
         assert!(output.is_empty());
     }
 
@@ -374,7 +408,7 @@ mod tests {
 
         context.create_healthy_entry("zshrc", ".zshrc");
 
-        let result = execute_with_paths(&context.paths, &mut FailingWriter);
+        let result = execute_with_paths(None, &context.paths, &mut FailingWriter);
 
         assert!(matches!(result, Err(TestCommandError::Io(_))));
     }
@@ -383,7 +417,7 @@ mod tests {
     fn test_command_propagates_output_error_for_empty_manifest() {
         let context = TestContext::new();
 
-        let result = execute_with_paths(&context.paths, &mut FailingWriter);
+        let result = execute_with_paths(None, &context.paths, &mut FailingWriter);
 
         assert!(matches!(result, Err(TestCommandError::Io(_))));
     }
@@ -399,7 +433,6 @@ mod tests {
         let (healthy, _) = context.run();
 
         assert!(healthy);
-
         assert_eq!(fs::read(context.manifest_file()).unwrap(), before);
     }
 
@@ -410,7 +443,6 @@ mod tests {
         context.create_healthy_entry("zshrc", ".zshrc");
 
         let config_before = fs::read(context.paths.config_file()).unwrap();
-
         let backups_before = fs::read(context.paths.backup_file()).unwrap();
 
         let (healthy, _) = context.run();
@@ -445,7 +477,187 @@ mod tests {
         assert!(healthy);
 
         assert_eq!(fs::read(&source).unwrap(), source_before);
-
         assert_eq!(fs::read_link(&target).unwrap(), destination_before);
+    }
+
+    #[test]
+    fn test_command_inspects_only_requested_healthy_target() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+        context.add_entry("nvim", ".config/nvim");
+
+        let (healthy, output) = context.run_target(".zshrc");
+
+        assert!(healthy);
+        assert!(output.contains("[OK]"));
+        assert!(output.contains(".zshrc"));
+        assert!(!output.contains(".config/nvim"));
+        assert!(output.contains("1 healthy, 0 unhealthy"));
+    }
+
+    #[test]
+    fn test_command_inspects_only_requested_unhealthy_target() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+        context.add_entry("nvim", ".config/nvim");
+
+        let (healthy, output) = context.run_target(".config/nvim");
+
+        assert!(!healthy);
+        assert!(output.contains("[ERR]"));
+        assert!(output.contains(".config/nvim"));
+        assert!(!output.contains(".zshrc"));
+        assert!(output.contains("Missing source"));
+        assert!(output.contains("Missing target"));
+        assert!(output.contains("0 healthy, 1 unhealthy"));
+    }
+
+    #[test]
+    fn test_command_inspects_target_with_missing_symlink() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+
+        fs::remove_file(context.home_dir.join(".zshrc")).unwrap();
+
+        let (healthy, output) = context.run_target(".zshrc");
+
+        assert!(!healthy);
+        assert!(output.contains("Missing target"));
+        assert!(output.contains("0 healthy, 1 unhealthy"));
+    }
+
+    #[test]
+    fn test_command_inspects_target_with_wrong_symlink() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+
+        let target = context.home_dir.join(".zshrc");
+        let wrong_source = context.repo_dir.join("other");
+
+        fs::remove_file(&target).unwrap();
+        symlink(&wrong_source, &target).unwrap();
+
+        let (healthy, output) = context.run_target(".zshrc");
+
+        assert!(!healthy);
+        assert!(output.contains("Wrong symlink destination"));
+        assert!(output.contains("0 healthy, 1 unhealthy"));
+    }
+
+    #[test]
+    fn test_command_rejects_unmanaged_target() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+
+        let mut output = Vec::new();
+
+        let result = execute_with_paths(
+            Some(context.home_dir.join(".bashrc")),
+            &context.paths,
+            &mut output,
+        );
+
+        assert!(matches!(result, Err(TestCommandError::TargetNotManaged)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_command_rejects_target_outside_home() {
+        let context = TestContext::new();
+
+        let mut output = Vec::new();
+
+        let result = execute_with_paths(
+            Some(context.repo_dir.join("zshrc")),
+            &context.paths,
+            &mut output,
+        );
+
+        assert!(matches!(result, Err(TestCommandError::InvalidTarget)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_command_rejects_relative_target() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+
+        let mut output = Vec::new();
+
+        let result = execute_with_paths(Some(PathBuf::from(".zshrc")), &context.paths, &mut output);
+
+        assert!(matches!(result, Err(TestCommandError::InvalidTarget)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_command_rejects_parent_directory_traversal() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+
+        let mut output = Vec::new();
+
+        let result = execute_with_paths(
+            Some(context.home_dir.join("../home/.zshrc")),
+            &context.paths,
+            &mut output,
+        );
+
+        assert!(matches!(result, Err(TestCommandError::InvalidTarget)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_command_propagates_output_error_for_target() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+
+        let result = execute_with_paths(
+            Some(context.home_dir.join(".zshrc")),
+            &context.paths,
+            &mut FailingWriter,
+        );
+
+        assert!(matches!(result, Err(TestCommandError::Io(_))));
+    }
+
+    #[test]
+    fn test_command_does_not_modify_files_when_inspecting_target() {
+        let context = TestContext::new();
+
+        context.create_healthy_entry("zshrc", ".zshrc");
+
+        let source = context.repo_dir.join("zshrc");
+        let target = context.home_dir.join(".zshrc");
+
+        let manifest_before = fs::read(context.manifest_file()).unwrap();
+        let config_before = fs::read(context.paths.config_file()).unwrap();
+        let backups_before = fs::read(context.paths.backup_file()).unwrap();
+        let source_before = fs::read(&source).unwrap();
+        let target_before = fs::read_link(&target).unwrap();
+
+        let (healthy, _) = context.run_target(".zshrc");
+
+        assert!(healthy);
+
+        assert_eq!(fs::read(context.manifest_file()).unwrap(), manifest_before);
+        assert_eq!(
+            fs::read(context.paths.config_file()).unwrap(),
+            config_before
+        );
+        assert_eq!(
+            fs::read(context.paths.backup_file()).unwrap(),
+            backups_before
+        );
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(fs::read_link(&target).unwrap(), target_before);
     }
 }
