@@ -1,10 +1,11 @@
-use std::{collections::hash_map, path::PathBuf};
+use std::path::PathBuf;
 
 use crate::{
     application::{Plan, PlanExecutionError, PlanExecutor},
     domain::{
-        BackupEntry, BackupKind, BackupRoot, ConfigRoot, ConfigRootError, EntryKind, ManagedEntry,
-        ManagedSource, ManagedTarget, ManifestRoot, ManifestRootError,
+        BackupEntry, BackupId, BackupKind, BackupRoot, BackupRootError, ConfigRoot,
+        ConfigRootError, EntryKind, ManagedEntry, ManagedSource, ManagedTarget, ManifestRoot,
+        ManifestRootError,
     },
     infrastructure::{
         filesystem::{
@@ -116,16 +117,16 @@ impl DotfileManager {
         let source = self.config.resolve_source(managed_entry.source());
         let target = self.config.resolve_target(managed_entry.target());
 
-        let new_backup_entry = BackupEntry::new(managed_entry.kind(), BackupKind::Link);
+        let backup_id = BackupId::new();
 
-        match backups.backups_mut().entry(managed_entry.source().clone()) {
-            hash_map::Entry::Occupied(entry) => {
-                entry.into_mut().backups_mut().insert(BackupKind::Link);
-            }
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert(new_backup_entry);
-            }
-        };
+        let backup_entry = BackupEntry::new(
+            managed_entry.source().clone(),
+            managed_entry.target().clone(),
+            managed_entry.kind().clone(),
+            BackupKind::Link,
+        );
+
+        backups.add(backup_id, backup_entry)?;
 
         manifest.add(managed_entry.clone())?;
 
@@ -139,12 +140,10 @@ impl DotfileManager {
 
         plan.extend(repository_plan);
 
-        for action in self.backup_storage.backup_actions(
-            &target,
-            managed_entry.source(),
-            managed_entry.kind(),
-            BackupKind::Link,
-        )? {
+        for action in
+            self.backup_storage
+                .backup_actions(&target, backup_id, managed_entry.kind().clone())?
+        {
             plan.push(action.into());
         }
 
@@ -210,12 +209,16 @@ impl DotfileManager {
             .cloned()
             .ok_or_else(|| DotfileManagerError::Unmanaged(physical_target.to_path_buf()))?;
 
-        let backup_entry = backups
-            .backups_mut()
-            .get_mut(managed_entry.source())
-            .ok_or(DotfileManagerError::Unmanaged(physical_target))?;
+        let backup_id = BackupId::new();
 
-        backup_entry.backups_mut().insert(BackupKind::Unlink);
+        let backup_entry = BackupEntry::new(
+            managed_entry.source().clone(),
+            managed_entry.target().clone(),
+            managed_entry.kind().clone(),
+            BackupKind::Unlink,
+        );
+
+        backups.add(backup_id, backup_entry)?;
 
         manifest.remove(&managed_entry);
 
@@ -231,12 +234,10 @@ impl DotfileManager {
         let repository_plan =
             repository_layout.managed_source_cleanup_plan(managed_entry.source())?;
 
-        for action in self.backup_storage.backup_actions(
-            &source,
-            managed_entry.source(),
-            managed_entry.kind(),
-            BackupKind::Unlink,
-        )? {
+        for action in
+            self.backup_storage
+                .backup_actions(&source, backup_id, managed_entry.kind().clone())?
+        {
             plan.push(action.into());
         }
 
@@ -288,6 +289,8 @@ pub enum DotfileManagerError {
     RepositoryLayout(#[from] RepositoryLayoutError),
     #[error(transparent)]
     ManifestRoot(#[from] ManifestRootError),
+    #[error(transparent)]
+    BackupRoot(#[from] BackupRootError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -302,7 +305,7 @@ pub enum DotfileManagerLoadError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashSet, fs, path::PathBuf};
 
     use tempfile::TempDir;
 
@@ -311,15 +314,8 @@ mod tests {
 
     struct TestContext {
         _temp: TempDir,
-
-        #[allow(unused)]
-        config_dir: PathBuf,
-        #[allow(unused)]
-        storage_dir: PathBuf,
-
         home_dir: PathBuf,
         repo_dir: PathBuf,
-
         paths: DottyPaths,
         repository_paths: RepositoryPaths,
     }
@@ -338,7 +334,7 @@ mod tests {
             fs::create_dir_all(&home_dir).unwrap();
             fs::create_dir_all(&repo_dir).unwrap();
 
-            let paths = DottyPaths::new(config_dir.clone(), storage_dir.clone(), home_dir.clone());
+            let paths = DottyPaths::new(config_dir, storage_dir, home_dir.clone());
 
             fs::create_dir_all(paths.backup_dir()).unwrap();
 
@@ -346,24 +342,20 @@ mod tests {
 
             fs::create_dir_all(repository_paths.metadata_dir()).unwrap();
 
-            let config_repository = ConfigRepository::new(paths.config_file());
-
-            let backup_repository = BackupRepository::new(paths.backup_file());
-
-            let manifest_repository = ManifestRepository::new(&repository_paths.manifest_file());
-
-            config_repository
+            ConfigRepository::new(paths.config_file())
                 .write(&ConfigRoot::new(repo_dir.clone(), home_dir.clone()))
                 .unwrap();
 
-            backup_repository.write(&BackupRoot::new()).unwrap();
+            BackupRepository::new(paths.backup_file())
+                .write(&BackupRoot::new())
+                .unwrap();
 
-            manifest_repository.write(&ManifestRoot::new()).unwrap();
+            ManifestRepository::new(&repository_paths.manifest_file())
+                .write(&ManifestRoot::new())
+                .unwrap();
 
             Self {
                 _temp: temp,
-                config_dir,
-                storage_dir,
                 home_dir,
                 repo_dir,
                 paths,
@@ -387,11 +379,11 @@ mod tests {
             ManagedSource::new(PathBuf::from(path)).unwrap()
         }
 
-        #[allow(unused)]
-        fn read_config(&self) -> ConfigRoot {
-            ConfigRepository::new(self.paths.config_file())
-                .read()
-                .unwrap()
+        fn create_file(&self, path: &str, contents: &str) {
+            let target = self.target(path);
+
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(target, contents).unwrap();
         }
 
         fn read_manifest(&self) -> ManifestRoot {
@@ -404,6 +396,32 @@ mod tests {
             BackupRepository::new(self.paths.backup_file())
                 .read()
                 .unwrap()
+        }
+
+        fn operations_dir(&self) -> PathBuf {
+            self.paths.backup_dir().join("operations")
+        }
+
+        fn snapshot(&self, id: BackupId) -> PathBuf {
+            self.operations_dir().join(id.to_string()).join("snapshot")
+        }
+
+        fn snapshot_count(&self) -> usize {
+            if !self.operations_dir().exists() {
+                return 0;
+            }
+
+            fs::read_dir(self.operations_dir()).unwrap().count()
+        }
+
+        fn manage(&self, manager: &mut DotfileManager, target: &str, source: &str) {
+            manager
+                .manage(self.managed_target(target), self.managed_source(source))
+                .unwrap();
+        }
+
+        fn forget(&self, manager: &mut DotfileManager, target: &str) {
+            manager.forget(self.managed_target(target)).unwrap();
         }
     }
 
@@ -431,8 +449,7 @@ mod tests {
     fn manage_persists_entry_in_manifest() {
         let context = TestContext::new();
 
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
+        context.create_file(".zshrc", "hello");
 
         let managed_target = context.managed_target(".zshrc");
         let managed_source = context.managed_source("zshrc");
@@ -458,148 +475,24 @@ mod tests {
     fn manage_does_not_modify_config() {
         let context = TestContext::new();
 
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
+        context.create_file(".zshrc", "hello");
 
-        let managed_target = context.managed_target(".zshrc");
-        let managed_source = context.managed_source("zshrc");
-
-        let config_before = fs::read(context.paths.config_file()).unwrap();
+        let before = fs::read(context.paths.config_file()).unwrap();
 
         let mut manager = context.manager();
 
-        manager.manage(managed_target, managed_source).unwrap();
+        context.manage(&mut manager, ".zshrc", "zshrc");
 
-        let config_after = fs::read(context.paths.config_file()).unwrap();
+        let after = fs::read(context.paths.config_file()).unwrap();
 
-        assert_eq!(config_before, config_after);
+        assert_eq!(before, after);
     }
 
     #[test]
     fn manage_persists_backup_metadata() {
         let context = TestContext::new();
 
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
-
-        let managed_target = context.managed_target(".zshrc");
-        let managed_source = context.managed_source("zshrc");
-
-        let mut manager = context.manager();
-
-        manager
-            .manage(managed_target, managed_source.clone())
-            .unwrap();
-
-        let backups = context.read_backups();
-
-        let entry = backups.backups().get(&managed_source).unwrap();
-
-        assert!(entry.backups().contains(&BackupKind::Link));
-    }
-
-    #[test]
-    fn manage_moves_target_into_repository() {
-        let context = TestContext::new();
-
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
-
-        let managed_target = context.managed_target(".zshrc");
-        let managed_source = context.managed_source("zshrc");
-
-        let mut manager = context.manager();
-
-        manager.manage(managed_target, managed_source).unwrap();
-
-        let stored = context.repo_dir.join("zshrc");
-
-        assert!(stored.is_file());
-
-        assert!(matches!(
-            filesystem::path_kind(&target).unwrap(),
-            Some(PathKind::Symlink)
-        ));
-    }
-
-    #[test]
-    fn forget_removes_entry_from_manifest() {
-        let context = TestContext::new();
-
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
-
-        let managed_target = context.managed_target(".zshrc");
-        let managed_source = context.managed_source("zshrc");
-
-        let mut manager = context.manager();
-
-        manager
-            .manage(managed_target.clone(), managed_source)
-            .unwrap();
-
-        assert_eq!(context.read_manifest().manages().len(), 1);
-
-        manager.forget(managed_target).unwrap();
-
-        let manifest = context.read_manifest();
-
-        assert!(manifest.manages().is_empty());
-    }
-
-    #[test]
-    fn forget_does_not_modify_config() {
-        let context = TestContext::new();
-
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
-
-        let managed_target = context.managed_target(".zshrc");
-        let managed_source = context.managed_source("zshrc");
-
-        let mut manager = context.manager();
-
-        manager
-            .manage(managed_target.clone(), managed_source)
-            .unwrap();
-
-        let config_before = fs::read(context.paths.config_file()).unwrap();
-
-        manager.forget(managed_target).unwrap();
-
-        let config_after = fs::read(context.paths.config_file()).unwrap();
-
-        assert_eq!(config_before, config_after);
-    }
-
-    #[test]
-    fn forget_restores_original_target() {
-        let context = TestContext::new();
-
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
-
-        let managed_target = context.managed_target(".zshrc");
-        let managed_source = context.managed_source("zshrc");
-
-        let mut manager = context.manager();
-
-        manager
-            .manage(managed_target.clone(), managed_source)
-            .unwrap();
-
-        manager.forget(managed_target).unwrap();
-
-        assert!(target.is_file());
-        assert_eq!(fs::read_to_string(target).unwrap(), "hello");
-    }
-
-    #[test]
-    fn forget_persists_unlink_backup_metadata() {
-        let context = TestContext::new();
-
-        let target = context.target(".zshrc");
-        fs::write(&target, "hello").unwrap();
+        context.create_file(".zshrc", "hello");
 
         let managed_target = context.managed_target(".zshrc");
         let managed_source = context.managed_source("zshrc");
@@ -610,38 +503,160 @@ mod tests {
             .manage(managed_target.clone(), managed_source.clone())
             .unwrap();
 
-        manager.forget(managed_target).unwrap();
+        let backups = context.read_backups();
+
+        assert_eq!(backups.backups().len(), 1);
+
+        let (id, entry) = backups.backups().iter().next().unwrap();
+
+        assert_eq!(entry.source(), &managed_source);
+        assert_eq!(entry.target(), &managed_target);
+        assert_eq!(entry.entry_kind(), &EntryKind::File);
+        assert_eq!(entry.backup_kind(), &BackupKind::Link);
+
+        let snapshot = context.snapshot(*id);
+
+        assert!(snapshot.is_file());
+        assert_eq!(fs::read_to_string(snapshot).unwrap(), "hello");
+    }
+
+    #[test]
+    fn manage_moves_target_into_repository() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let stored = context.repo_dir.join("zshrc");
+        let target = context.target(".zshrc");
+
+        assert!(stored.is_file());
+
+        assert_eq!(fs::read_to_string(&stored).unwrap(), "hello");
+
+        assert!(matches!(
+            filesystem::path_kind(&target).unwrap(),
+            Some(PathKind::Symlink)
+        ));
+
+        assert_eq!(fs::read_link(target).unwrap(), stored);
+    }
+
+    #[test]
+    fn forget_removes_entry_from_manifest() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        assert_eq!(context.read_manifest().manages().len(), 1);
+
+        context.forget(&mut manager, ".zshrc");
+
+        assert!(context.read_manifest().manages().is_empty());
+    }
+
+    #[test]
+    fn forget_does_not_modify_config() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let before = fs::read(context.paths.config_file()).unwrap();
+
+        context.forget(&mut manager, ".zshrc");
+
+        let after = fs::read(context.paths.config_file()).unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn forget_restores_original_target() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+        context.forget(&mut manager, ".zshrc");
+
+        let target = context.target(".zshrc");
+
+        assert!(target.is_file());
+
+        assert_eq!(
+            filesystem::path_kind(&target).unwrap(),
+            Some(PathKind::File)
+        );
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "hello");
+
+        assert!(!context.repo_dir.join("zshrc").exists());
+    }
+
+    #[test]
+    fn forget_persists_unlink_backup_metadata() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let managed_target = context.managed_target(".zshrc");
+        let managed_source = context.managed_source("zshrc");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+        context.forget(&mut manager, ".zshrc");
 
         let backups = context.read_backups();
 
-        let entry = backups.backups().get(&managed_source).unwrap();
+        assert_eq!(backups.backups().len(), 2);
 
-        assert!(entry.backups().contains(&BackupKind::Link));
-        assert!(entry.backups().contains(&BackupKind::Unlink));
+        let mut kinds = HashSet::new();
+
+        for (id, entry) in backups.backups() {
+            assert_eq!(entry.source(), &managed_source);
+            assert_eq!(entry.target(), &managed_target);
+            assert_eq!(entry.entry_kind(), &EntryKind::File);
+
+            kinds.insert(entry.backup_kind().clone());
+
+            assert_eq!(fs::read_to_string(context.snapshot(*id)).unwrap(), "hello");
+        }
+
+        assert_eq!(
+            kinds,
+            HashSet::from([BackupKind::Link, BackupKind::Unlink,])
+        );
     }
 
     #[test]
     fn manage_supports_nested_source_path() {
         let context = TestContext::new();
 
-        let target = context.target(".config/ghostty/config");
-
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, "hello").unwrap();
-
-        let managed_target = context.managed_target(".config/ghostty/config");
-
-        let managed_source = context.managed_source("ghostty/config");
+        context.create_file(".config/ghostty/config", "hello");
 
         let mut manager = context.manager();
 
-        manager
-            .manage(managed_target, managed_source.clone())
-            .unwrap();
+        context.manage(&mut manager, ".config/ghostty/config", "ghostty/config");
 
         let stored = context.repo_dir.join("ghostty/config");
+        let target = context.target(".config/ghostty/config");
 
         assert!(stored.is_file());
+
         assert_eq!(fs::read_to_string(&stored).unwrap(), "hello");
 
         assert!(matches!(
@@ -656,7 +671,7 @@ mod tests {
         let entry = manifest
             .manages()
             .iter()
-            .find(|entry| entry.source() == &managed_source)
+            .find(|entry| entry.source() == &context.managed_source("ghostty/config"))
             .unwrap();
 
         assert_eq!(
@@ -669,19 +684,20 @@ mod tests {
     fn manage_rolls_back_nested_directories_when_later_action_fails() {
         let context = TestContext::new();
 
+        context.create_file(".config/ghostty/config", "original content");
+
         let target = context.target(".config/ghostty/config");
 
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, "original content").unwrap();
-
-        let managed_target = context.managed_target(".config/ghostty/config");
-        let managed_source = context.managed_source("ghostty/config");
+        let entry = ManagedEntry::new(
+            context.managed_source("ghostty/config"),
+            context.managed_target(".config/ghostty/config"),
+            EntryKind::File,
+        );
 
         let manager = context.manager();
 
-        let entry = ManagedEntry::new(managed_source.clone(), managed_target, EntryKind::File);
-
         let manifest_before = fs::read(context.repository_paths.manifest_file()).unwrap();
+
         let backups_before = fs::read(context.paths.backup_file()).unwrap();
 
         let (mut plan, _, _) = manager.build_manage_plan(entry).unwrap();
@@ -693,13 +709,15 @@ mod tests {
         assert!(matches!(result, Err(PlanExecutionError::Execution { .. })));
 
         assert!(target.is_file());
+
         assert_eq!(fs::read_to_string(&target).unwrap(), "original content");
 
         assert!(!context.repo_dir.join("ghostty/config").exists());
         assert!(!context.repo_dir.join("ghostty").exists());
 
-        assert!(!context.paths.backup_dir().join("ghostty/config").exists());
-        assert!(!context.paths.backup_dir().join("ghostty").exists());
+        assert_eq!(context.snapshot_count(), 0);
+
+        assert!(!context.operations_dir().exists());
 
         assert!(context.repo_dir.is_dir());
         assert!(context.paths.backup_dir().is_dir());
@@ -708,6 +726,7 @@ mod tests {
             fs::read(context.repository_paths.manifest_file()).unwrap(),
             manifest_before
         );
+
         assert_eq!(
             fs::read(context.paths.backup_file()).unwrap(),
             backups_before
@@ -718,24 +737,24 @@ mod tests {
     fn forget_removes_empty_nested_source_directories() {
         let context = TestContext::new();
 
-        let target = context.target(".config/nvim/init.lua");
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, "vim.opt.number = true").unwrap();
-
-        let managed_target = context.managed_target(".config/nvim/init.lua");
-        let managed_source = context.managed_source("editors/nvim/init.lua");
+        context.create_file(".config/nvim/init.lua", "vim.opt.number = true");
 
         let mut manager = context.manager();
 
-        manager
-            .manage(managed_target.clone(), managed_source)
-            .unwrap();
+        context.manage(
+            &mut manager,
+            ".config/nvim/init.lua",
+            "editors/nvim/init.lua",
+        );
 
         assert!(context.repo_dir.join("editors/nvim/init.lua").is_file());
 
-        manager.forget(managed_target).unwrap();
+        context.forget(&mut manager, ".config/nvim/init.lua");
+
+        let target = context.target(".config/nvim/init.lua");
 
         assert!(target.is_file());
+
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             "vim.opt.number = true"
@@ -746,143 +765,134 @@ mod tests {
 
         assert!(context.repo_dir.is_dir());
         assert!(context.repository_paths.metadata_dir().is_dir());
+
         assert!(context.read_manifest().manages().is_empty());
+        assert_eq!(context.read_backups().backups().len(), 2);
     }
 
     #[test]
     fn forget_preserves_directory_containing_other_managed_sources() {
         let context = TestContext::new();
 
-        let config_target = context.target(".config/ghostty/config");
-        let theme_target = context.target(".config/ghostty/themes.toml");
+        context.create_file(".config/ghostty/config", "font-size = 14");
 
-        fs::create_dir_all(config_target.parent().unwrap()).unwrap();
-        fs::write(&config_target, "font-size = 14").unwrap();
-        fs::write(&theme_target, "theme = 'dark'").unwrap();
-
-        let config_managed_target = context.managed_target(".config/ghostty/config");
-        let theme_managed_target = context.managed_target(".config/ghostty/themes.toml");
+        context.create_file(".config/ghostty/themes.toml", "theme = 'dark'");
 
         let mut manager = context.manager();
 
-        manager
-            .manage(
-                config_managed_target.clone(),
-                context.managed_source("ghostty/config"),
-            )
-            .unwrap();
+        context.manage(&mut manager, ".config/ghostty/config", "ghostty/config");
 
-        manager
-            .manage(
-                theme_managed_target.clone(),
-                context.managed_source("ghostty/themes.toml"),
-            )
-            .unwrap();
+        context.manage(
+            &mut manager,
+            ".config/ghostty/themes.toml",
+            "ghostty/themes.toml",
+        );
 
-        manager.forget(config_managed_target).unwrap();
+        context.forget(&mut manager, ".config/ghostty/config");
 
         assert!(context.repo_dir.join("ghostty").is_dir());
+
         assert!(context.repo_dir.join("ghostty/themes.toml").is_file());
+
         assert!(!context.repo_dir.join("ghostty/config").exists());
 
         assert_eq!(
-            fs::read_to_string(&config_target).unwrap(),
+            fs::read_to_string(context.target(".config/ghostty/config")).unwrap(),
             "font-size = 14"
         );
 
         assert!(matches!(
-            filesystem::path_kind(&theme_target).unwrap(),
+            filesystem::path_kind(&context.target(".config/ghostty/themes.toml")).unwrap(),
             Some(PathKind::Symlink)
         ));
 
         assert_eq!(context.read_manifest().manages().len(), 1);
+        assert_eq!(context.read_backups().backups().len(), 3);
     }
 
     #[test]
     fn forget_removes_shared_directory_after_last_source() {
         let context = TestContext::new();
 
-        let first_target = context.target(".config/ghostty/config");
-        let second_target = context.target(".config/ghostty/themes.toml");
+        context.create_file(".config/ghostty/config", "config content");
 
-        fs::create_dir_all(first_target.parent().unwrap()).unwrap();
-        fs::write(&first_target, "config content").unwrap();
-        fs::write(&second_target, "theme content").unwrap();
-
-        let first_managed_target = context.managed_target(".config/ghostty/config");
-        let second_managed_target = context.managed_target(".config/ghostty/themes.toml");
+        context.create_file(".config/ghostty/themes.toml", "theme content");
 
         let mut manager = context.manager();
 
-        manager
-            .manage(
-                first_managed_target.clone(),
-                context.managed_source("ghostty/config"),
-            )
-            .unwrap();
+        context.manage(&mut manager, ".config/ghostty/config", "ghostty/config");
 
-        manager
-            .manage(
-                second_managed_target.clone(),
-                context.managed_source("ghostty/themes.toml"),
-            )
-            .unwrap();
+        context.manage(
+            &mut manager,
+            ".config/ghostty/themes.toml",
+            "ghostty/themes.toml",
+        );
 
-        manager.forget(first_managed_target).unwrap();
+        context.forget(&mut manager, ".config/ghostty/config");
 
         assert!(context.repo_dir.join("ghostty").is_dir());
 
-        manager.forget(second_managed_target).unwrap();
+        context.forget(&mut manager, ".config/ghostty/themes.toml");
 
         assert!(!context.repo_dir.join("ghostty").exists());
 
-        assert_eq!(fs::read_to_string(&first_target).unwrap(), "config content");
-        assert_eq!(fs::read_to_string(&second_target).unwrap(), "theme content");
+        assert_eq!(
+            fs::read_to_string(context.target(".config/ghostty/config")).unwrap(),
+            "config content"
+        );
+
+        assert_eq!(
+            fs::read_to_string(context.target(".config/ghostty/themes.toml")).unwrap(),
+            "theme content"
+        );
 
         assert!(context.repo_dir.is_dir());
         assert!(context.read_manifest().manages().is_empty());
+
+        assert_eq!(context.read_backups().backups().len(), 4);
     }
 
     #[test]
     fn forget_rolls_back_nested_directory_cleanup_when_later_action_fails() {
         let context = TestContext::new();
 
-        let target = context.target(".config/nvim/init.lua");
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, "original content").unwrap();
+        context.create_file(".config/nvim/init.lua", "original content");
 
         let managed_target = context.managed_target(".config/nvim/init.lua");
-        let managed_source = context.managed_source("editors/nvim/init.lua");
 
         let mut manager = context.manager();
 
-        manager
-            .manage(managed_target.clone(), managed_source.clone())
-            .unwrap();
+        context.manage(
+            &mut manager,
+            ".config/nvim/init.lua",
+            "editors/nvim/init.lua",
+        );
 
         let manifest_before = fs::read(context.repository_paths.manifest_file()).unwrap();
+
         let backups_before = fs::read(context.paths.backup_file()).unwrap();
+
+        let snapshots_before = context.snapshot_count();
 
         let (mut plan, _, _) = manager.build_forget_plan(&managed_target).unwrap();
 
-        // Force failure after the normal forget actions.
         plan.push(FileSystemAction::RemoveFile(context.repo_dir.join("nonexistent-file")).into());
 
         let result = PlanExecutor::execute(plan);
 
         assert!(matches!(result, Err(PlanExecutionError::Execution { .. })));
 
-        // The managed source must be restored.
         let source = context.repo_dir.join("editors/nvim/init.lua");
 
         assert!(source.is_file());
+
         assert_eq!(fs::read_to_string(&source).unwrap(), "original content");
 
-        // Removed parent directories must be recreated.
         assert!(context.repo_dir.join("editors/nvim").is_dir());
         assert!(context.repo_dir.join("editors").is_dir());
 
-        // The original target must again be a symlink.
+        let target = context.target(".config/nvim/init.lua");
+
         assert!(matches!(
             filesystem::path_kind(&target).unwrap(),
             Some(PathKind::Symlink)
@@ -890,23 +900,227 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "original content");
 
-        // Persistent metadata must be unchanged.
         assert_eq!(
             fs::read(context.repository_paths.manifest_file()).unwrap(),
             manifest_before
         );
+
         assert_eq!(
             fs::read(context.paths.backup_file()).unwrap(),
             backups_before
         );
 
-        // Any backup created by the failed forget must be removed.
-        assert!(
-            !context
-                .paths
-                .backup_dir()
-                .join("editors/nvim/init.lua/unlink")
-                .exists()
+        assert_eq!(context.snapshot_count(), snapshots_before);
+
+        assert_eq!(context.read_backups().backups().len(), 1);
+    }
+
+    #[test]
+    fn manage_forget_manage_preserves_all_backup_snapshots() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "version 1");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        fs::write(context.repo_dir.join("zshrc"), "version 2").unwrap();
+
+        context.forget(&mut manager, ".zshrc");
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let backups = context.read_backups();
+
+        assert_eq!(backups.backups().len(), 3);
+        assert_eq!(context.snapshot_count(), 3);
+
+        let mut link_contents = Vec::new();
+        let mut unlink_contents = Vec::new();
+
+        for (id, entry) in backups.backups() {
+            assert_eq!(entry.source(), &context.managed_source("zshrc"));
+
+            assert_eq!(entry.target(), &context.managed_target(".zshrc"));
+
+            let contents = fs::read_to_string(context.snapshot(*id)).unwrap();
+
+            match entry.backup_kind() {
+                BackupKind::Link => link_contents.push(contents),
+                BackupKind::Unlink => unlink_contents.push(contents),
+            }
+        }
+
+        link_contents.sort();
+
+        assert_eq!(
+            link_contents,
+            vec!["version 1".to_string(), "version 2".to_string(),]
         );
+
+        assert_eq!(unlink_contents, vec!["version 2".to_string()]);
+
+        assert_eq!(context.read_manifest().manages().len(), 1);
+
+        assert!(matches!(
+            filesystem::path_kind(&context.target(".zshrc")).unwrap(),
+            Some(PathKind::Symlink)
+        ));
+    }
+
+    #[test]
+    fn backup_history_survives_manager_reload() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        {
+            let mut manager = context.manager();
+
+            context.manage(&mut manager, ".zshrc", "zshrc");
+            context.forget(&mut manager, ".zshrc");
+        }
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let backups = context.read_backups();
+
+        assert_eq!(backups.backups().len(), 3);
+        assert_eq!(context.snapshot_count(), 3);
+
+        let ids: HashSet<_> = backups.backups().keys().copied().collect();
+
+        assert_eq!(ids.len(), 3);
+
+        for id in ids {
+            assert!(context.snapshot(id).is_file());
+        }
+    }
+
+    #[test]
+    fn manage_directory_creates_directory_snapshot() {
+        let context = TestContext::new();
+
+        context.create_file(".config/nvim/init.lua", "vim.opt.number = true");
+
+        context.create_file(".config/nvim/lua/settings.lua", "return {}");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".config/nvim", "nvim");
+
+        let backups = context.read_backups();
+
+        assert_eq!(backups.backups().len(), 1);
+
+        let (id, entry) = backups.backups().iter().next().unwrap();
+
+        assert_eq!(entry.entry_kind(), &EntryKind::Dir);
+        assert_eq!(entry.backup_kind(), &BackupKind::Link);
+
+        assert_eq!(entry.source(), &context.managed_source("nvim"));
+
+        assert_eq!(entry.target(), &context.managed_target(".config/nvim"));
+
+        let snapshot = context.snapshot(*id);
+
+        assert!(snapshot.is_dir());
+
+        assert_eq!(
+            fs::read_to_string(snapshot.join("init.lua")).unwrap(),
+            "vim.opt.number = true"
+        );
+
+        assert_eq!(
+            fs::read_to_string(snapshot.join("lua/settings.lua")).unwrap(),
+            "return {}"
+        );
+
+        assert!(context.repo_dir.join("nvim").is_dir());
+
+        assert!(matches!(
+            filesystem::path_kind(&context.target(".config/nvim")).unwrap(),
+            Some(PathKind::Symlink)
+        ));
+    }
+
+    #[test]
+    fn forget_directory_preserves_backup_history() {
+        let context = TestContext::new();
+
+        context.create_file(".config/nvim/init.lua", "original");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".config/nvim", "nvim");
+
+        fs::write(context.repo_dir.join("nvim/init.lua"), "modified").unwrap();
+
+        context.forget(&mut manager, ".config/nvim");
+
+        let backups = context.read_backups();
+
+        assert_eq!(backups.backups().len(), 2);
+
+        for (id, entry) in backups.backups() {
+            assert_eq!(entry.entry_kind(), &EntryKind::Dir);
+
+            let snapshot = context.snapshot(*id);
+
+            assert!(snapshot.is_dir());
+
+            let contents = fs::read_to_string(snapshot.join("init.lua")).unwrap();
+
+            match entry.backup_kind() {
+                BackupKind::Link => {
+                    assert_eq!(contents, "original");
+                }
+                BackupKind::Unlink => {
+                    assert_eq!(contents, "modified");
+                }
+            }
+        }
+
+        assert_eq!(
+            fs::read_to_string(context.target(".config/nvim/init.lua")).unwrap(),
+            "modified"
+        );
+
+        assert!(context.read_manifest().manages().is_empty());
+    }
+
+    #[test]
+    fn separate_managed_entries_create_independent_backup_histories() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "zsh");
+        context.create_file(".bashrc", "bash");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+        context.manage(&mut manager, ".bashrc", "bashrc");
+
+        let backups = context.read_backups();
+
+        assert_eq!(backups.backups().len(), 2);
+
+        let sources: HashSet<_> = backups
+            .backups()
+            .values()
+            .map(|entry| entry.source().clone())
+            .collect();
+
+        assert!(sources.contains(&context.managed_source("zshrc")));
+        assert!(sources.contains(&context.managed_source("bashrc")));
+
+        for id in backups.backups().keys() {
+            assert!(context.snapshot(*id).is_file());
+        }
+
+        assert_eq!(context.read_manifest().manages().len(), 2);
     }
 }

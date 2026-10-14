@@ -3,7 +3,7 @@ mod config;
 mod managed_entry;
 mod manifest;
 
-pub use backup::{BackupEntry, BackupKind, BackupRoot};
+pub use backup::{BackupEntry, BackupId, BackupKind, BackupRoot, BackupRootError};
 pub use config::{ConfigRoot, ConfigRootError};
 pub use managed_entry::{
     EntryKind, ManagedEntry, ManagedSource, ManagedSourceError, ManagedTarget, ManagedTargetError,
