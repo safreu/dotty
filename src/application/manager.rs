@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{
     application::{InspectionError, ManagedEntryInspector, Plan, PlanExecutionError, PlanExecutor},
@@ -276,6 +276,24 @@ impl DotfileManager {
                 )
             })
             .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub fn inspect_target(
+        &self,
+        target: &Path,
+    ) -> Result<Option<ManagedEntryInspection>, InspectionError> {
+        self.manifest
+            .manages()
+            .iter()
+            .find(|entry| entry.target().path() == target)
+            .map(|entry| {
+                ManagedEntryInspector::inspect(
+                    entry,
+                    self.config.repo_dir(),
+                    self.config.home_dir(),
+                )
+            })
+            .transpose()
     }
 }
 

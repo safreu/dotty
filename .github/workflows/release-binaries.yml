@@ -1,0 +1,201 @@
+name: Publish Release Binaries
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-validation
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "dotty") | .version'
+          )"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid Cargo version: $VERSION"
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF_NAME}" != "v${VERSION}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo version ${VERSION}"
+            exit 1
+          fi
+
+          echo "Release version: $VERSION"
+
+      - name: Verify tag belongs to main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin main
+
+          if ! git merge-base --is-ancestor \
+            "${GITHUB_SHA}" \
+            "origin/main"
+          then
+            echo "Release tag must point to a commit on main"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  build:
+    name: Dotty (${{ matrix.architecture.arch }})
+    needs: validate
+
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.architecture.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.architecture.target }}
+
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.architecture.arch }}
+
+      - name: Build release binary
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --target ${{ matrix.architecture.target }}
+
+      - name: Prepare release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp \
+            "target/${{ matrix.architecture.target }}/release/dotty" \
+            "dotty-linux-${{ matrix.architecture.arch }}"
+
+      - name: Verify static linking
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BINARY="dotty-linux-${{ matrix.architecture.arch }}"
+
+          file "$BINARY"
+
+          if readelf -l "$BINARY" | grep -q INTERP; then
+            echo "Binary is dynamically linked"
+            exit 1
+          fi
+
+          echo "Binary has no dynamic interpreter"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotty-linux-${{ matrix.architecture.arch }}
+          path: dotty-linux-${{ matrix.architecture.arch }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - validate
+      - build
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dotty-linux-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha256sum \
+            dotty-linux-amd64 \
+            dotty-linux-arm64 \
+            > SHA256SUMS
+
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release create "${GITHUB_REF_NAME}" \
+            dotty-linux-amd64 \
+            dotty-linux-arm64 \
+            SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "Dotty ${GITHUB_REF_NAME#v}"

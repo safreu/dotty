@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::commands::{completions, forget, init, manage, test};
+use crate::commands::{completions, forget, init, ls, manage, test};
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 
@@ -47,7 +47,10 @@ enum Commands {
         shell: Shell,
     },
 
-    Test,
+    Test {
+        path: Option<PathBuf>,
+    },
+    Ls,
 }
 
 fn main() -> std::process::ExitCode {
@@ -88,11 +91,18 @@ fn main() -> std::process::ExitCode {
             completions::execute(shell, Cli::command());
             std::process::ExitCode::SUCCESS
         }
-        Commands::Test => match test::execute() {
+        Commands::Test { path } => match test::execute(path) {
             Ok(true) => std::process::ExitCode::SUCCESS,
             Ok(false) => std::process::ExitCode::from(1),
             Err(error) => {
                 eprintln!("Failed to inspect dotfiles: {error}");
+                std::process::ExitCode::from(2)
+            }
+        },
+        Commands::Ls => match ls::execute() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Failed to list managed entries: {error}");
                 std::process::ExitCode::from(2)
             }
         },

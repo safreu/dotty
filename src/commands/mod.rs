@@ -5,6 +5,7 @@ use path_clean::PathClean;
 pub mod completions;
 pub mod forget;
 pub mod init;
+pub mod ls;
 pub mod manage;
 pub mod test;
 
