@@ -6,6 +6,7 @@ pub mod completions;
 pub mod forget;
 pub mod init;
 pub mod manage;
+pub mod test;
 
 fn resolve_target_path(path: &Path, cwd: &Path) -> PathBuf {
     if path.is_absolute() {

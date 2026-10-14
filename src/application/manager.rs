@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use crate::{
-    application::{Plan, PlanExecutionError, PlanExecutor},
+    application::{InspectionError, ManagedEntryInspector, Plan, PlanExecutionError, PlanExecutor},
     domain::{
         BackupEntry, BackupId, BackupKind, BackupRoot, BackupRootError, ConfigRoot,
-        ConfigRootError, EntryKind, ManagedEntry, ManagedSource, ManagedTarget, ManifestRoot,
-        ManifestRootError,
+        ConfigRootError, EntryKind, ManagedEntry, ManagedEntryInspection, ManagedSource,
+        ManagedTarget, ManifestRoot, ManifestRootError,
     },
     infrastructure::{
         filesystem::{
@@ -263,6 +263,20 @@ impl DotfileManager {
 
         Ok((plan, manifest, backups))
     }
+
+    pub fn inspect(&self) -> Result<Vec<ManagedEntryInspection>, InspectionError> {
+        self.manifest
+            .manages()
+            .iter()
+            .map(|entry| {
+                ManagedEntryInspector::inspect(
+                    entry,
+                    self.config.repo_dir(),
+                    self.config.home_dir(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -291,6 +305,8 @@ pub enum DotfileManagerError {
     ManifestRoot(#[from] ManifestRootError),
     #[error(transparent)]
     BackupRoot(#[from] BackupRootError),
+    #[error(transparent)]
+    Inspection(#[from] InspectionError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -310,7 +326,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::infrastructure::persistence::RepositoryPaths;
+    use crate::{domain::ManagedEntryIssue, infrastructure::persistence::RepositoryPaths};
 
     struct TestContext {
         _temp: TempDir,
@@ -1122,5 +1138,272 @@ mod tests {
         }
 
         assert_eq!(context.read_manifest().manages().len(), 2);
+    }
+
+    #[test]
+    fn inspect_returns_empty_results_for_empty_manifest() {
+        let context = TestContext::new();
+        let manager = context.manager();
+
+        let inspections = manager.inspect().unwrap();
+
+        assert!(inspections.is_empty());
+    }
+
+    #[test]
+    fn inspect_returns_healthy_result_for_managed_file() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 1);
+
+        let inspection = &inspections[0];
+
+        assert!(inspection.is_healthy());
+        assert!(inspection.issues().is_empty());
+
+        assert_eq!(
+            inspection.entry().source(),
+            &context.managed_source("zshrc")
+        );
+
+        assert_eq!(
+            inspection.entry().target(),
+            &context.managed_target(".zshrc")
+        );
+    }
+
+    #[test]
+    fn inspect_returns_healthy_result_for_managed_directory() {
+        let context = TestContext::new();
+
+        context.create_file(".config/nvim/init.lua", "vim.opt.number = true");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".config/nvim", "nvim");
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 1);
+        assert!(inspections[0].is_healthy());
+
+        assert_eq!(inspections[0].entry().kind(), &EntryKind::Dir);
+    }
+
+    #[test]
+    fn inspect_reports_missing_repository_source() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        fs::remove_file(context.repo_dir.join("zshrc")).unwrap();
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 1);
+
+        assert!(!inspections[0].is_healthy());
+
+        assert_eq!(inspections[0].issues(), &[ManagedEntryIssue::MissingSource]);
+    }
+
+    #[test]
+    fn inspect_reports_missing_target() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        fs::remove_file(context.target(".zshrc")).unwrap();
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 1);
+
+        assert_eq!(inspections[0].issues(), &[ManagedEntryIssue::MissingTarget]);
+    }
+
+    #[test]
+    fn inspect_reports_modified_target_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let target = context.target(".zshrc");
+
+        fs::remove_file(&target).unwrap();
+
+        symlink(context.repo_dir.join("other"), &target).unwrap();
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 1);
+
+        assert_eq!(
+            inspections[0].issues(),
+            &[ManagedEntryIssue::WrongSymlinkDestination]
+        );
+    }
+
+    #[test]
+    fn inspect_reports_target_replaced_with_regular_file() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let target = context.target(".zshrc");
+
+        fs::remove_file(&target).unwrap();
+        fs::write(&target, "replacement").unwrap();
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 1);
+
+        assert_eq!(
+            inspections[0].issues(),
+            &[ManagedEntryIssue::TargetNotSymlink]
+        );
+    }
+
+    #[test]
+    fn inspect_returns_results_for_multiple_entries() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "zsh");
+        context.create_file(".bashrc", "bash");
+        context.create_file(".config/ghostty/config", "ghostty");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+        context.manage(&mut manager, ".bashrc", "bashrc");
+        context.manage(&mut manager, ".config/ghostty/config", "ghostty/config");
+
+        fs::remove_file(context.repo_dir.join("bashrc")).unwrap();
+
+        fs::remove_file(context.target(".config/ghostty/config")).unwrap();
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 3);
+
+        let zsh = inspections
+            .iter()
+            .find(|inspection| inspection.entry().source() == &context.managed_source("zshrc"))
+            .unwrap();
+
+        let bash = inspections
+            .iter()
+            .find(|inspection| inspection.entry().source() == &context.managed_source("bashrc"))
+            .unwrap();
+
+        let ghostty = inspections
+            .iter()
+            .find(|inspection| {
+                inspection.entry().source() == &context.managed_source("ghostty/config")
+            })
+            .unwrap();
+
+        assert!(zsh.is_healthy());
+
+        assert_eq!(bash.issues(), &[ManagedEntryIssue::MissingSource]);
+
+        assert_eq!(ghostty.issues(), &[ManagedEntryIssue::MissingTarget]);
+
+        assert_eq!(
+            inspections
+                .iter()
+                .filter(|inspection| inspection.is_healthy())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn inspect_does_not_modify_persistent_state() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let manifest_before = fs::read(context.repository_paths.manifest_file()).unwrap();
+
+        let backups_before = fs::read(context.paths.backup_file()).unwrap();
+
+        let config_before = fs::read(context.paths.config_file()).unwrap();
+
+        let snapshots_before = context.snapshot_count();
+
+        let inspections = manager.inspect().unwrap();
+
+        assert_eq!(inspections.len(), 1);
+        assert!(inspections[0].is_healthy());
+
+        assert_eq!(
+            fs::read(context.repository_paths.manifest_file()).unwrap(),
+            manifest_before
+        );
+
+        assert_eq!(
+            fs::read(context.paths.backup_file()).unwrap(),
+            backups_before
+        );
+
+        assert_eq!(
+            fs::read(context.paths.config_file()).unwrap(),
+            config_before
+        );
+
+        assert_eq!(context.snapshot_count(), snapshots_before);
+    }
+
+    #[test]
+    fn inspect_does_not_modify_manager_state() {
+        let context = TestContext::new();
+
+        context.create_file(".zshrc", "hello");
+
+        let mut manager = context.manager();
+
+        context.manage(&mut manager, ".zshrc", "zshrc");
+
+        let first = manager.inspect().unwrap();
+        let second = manager.inspect().unwrap();
+
+        assert_eq!(first.len(), second.len());
+        assert_eq!(first.len(), 1);
+
+        assert_eq!(first[0].issues(), second[0].issues());
+
+        assert_eq!(first[0].entry(), second[0].entry());
     }
 }
