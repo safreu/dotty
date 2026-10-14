@@ -641,26 +641,25 @@ mod tests {
 
         assert!(path.is_dir());
     }
-
+    
     #[test]
     fn atomic_write_file_preserves_existing_file_when_replacement_fails() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("config.toml");
-
+    
         fs::write(&path, b"original").unwrap();
-
-        let mut permissions = fs::metadata(temp.path()).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(temp.path(), permissions).unwrap();
-
+    
+        let original_permissions = fs::metadata(temp.path()).unwrap().permissions();
+    
+        let mut readonly_permissions = original_permissions.clone();
+        readonly_permissions.set_readonly(true);
+        fs::set_permissions(temp.path(), readonly_permissions).unwrap();
+    
         let result = atomic_write_file(&path, b"replacement");
-
-        let mut permissions = fs::metadata(temp.path()).unwrap().permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(temp.path(), permissions).unwrap();
-
+    
+        fs::set_permissions(temp.path(), original_permissions).unwrap();
+    
         assert!(result.is_err());
-
         assert_eq!(fs::read(&path).unwrap(), b"original");
     }
 }
