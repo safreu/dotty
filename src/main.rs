@@ -1,14 +1,13 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
-
-use crate::commands::{forget, init, manage};
+use crate::commands::{completions, forget, init, manage};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::Shell;
 
 mod application;
 mod commands;
 mod domain;
 mod infrastructure;
-
 #[derive(Parser)]
 #[command(name = "dotty", about = "Dotfile management tool")]
 struct Cli {
@@ -30,16 +29,21 @@ enum Commands {
     },
     // Dotty will manage itself, meaning after init, program will call dotty manage 'self'
     Manage {
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::AnyPath)]
         target: PathBuf,
 
-        #[arg(long = "as")]
-        source: PathBuf,
+        #[arg(long = "as", value_hint = ValueHint::AnyPath)]
+        source: Option<PathBuf>,
     },
 
     Forget {
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::AnyPath)]
         target: PathBuf,
+    },
+
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
@@ -59,5 +63,6 @@ fn main() {
             Ok(_) => println!("forget success"),
             Err(e) => println!("Failed with {}", e),
         },
+        Commands::Completions { shell } => completions::execute(shell, Cli::command()),
     }
 }

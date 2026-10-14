@@ -54,19 +54,23 @@ fn build_plan(
 
     let config = ConfigRoot::new(repo_dir.to_path_buf(), paths.home_dir().to_path_buf());
     let backups = BackupRoot::new();
-    let manifest = ManifestRoot::new();
 
     let config_write = config_repository.prepare_write(&config)?;
     let backups_write = backups_repository.prepare_write(&backups)?;
-    let manifest_write = manifest_repository.prepare_write(&manifest)?;
+
+    if repository_paths.manifest_file().exists() {
+        manifest_repository.read()?;
+    } else {
+        let manifest = ManifestRoot::new();
+        let manifest_write = manifest_repository.prepare_write(&manifest)?;
+        let (path, contents) = manifest_write.into_parts();
+        plan.push(FileSystemAction::WriteFile { path, contents }.into());
+    }
 
     let (path, contents) = config_write.into_parts();
     plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
     let (path, contents) = backups_write.into_parts();
-    plan.push(FileSystemAction::WriteFile { path, contents }.into());
-
-    let (path, contents) = manifest_write.into_parts();
     plan.push(FileSystemAction::WriteFile { path, contents }.into());
 
     Ok(plan)
@@ -288,5 +292,114 @@ mod tests {
         assert!(!context.paths.config_file().exists());
         assert!(!context.paths.backup_file().exists());
         assert!(!repository_paths.manifest_file().exists());
+    }
+
+    #[test]
+    fn init_preserves_existing_manifest() {
+        use crate::domain::{EntryKind, ManagedEntry, ManagedSource, ManagedTarget};
+
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
+
+        fs::create_dir_all(repository_paths.metadata_dir()).unwrap();
+
+        let manifest_repository = ManifestRepository::new(&repository_paths.manifest_file());
+
+        let source = ManagedSource::new(PathBuf::from("ghostty/config")).unwrap();
+        let target = ManagedTarget::home_relative(PathBuf::from(".config/ghostty/config")).unwrap();
+
+        let mut manifest = ManifestRoot::new();
+        manifest
+            .add(ManagedEntry::new(source, target, EntryKind::File))
+            .unwrap();
+
+        manifest_repository.write(&manifest).unwrap();
+
+        let contents_before = fs::read(repository_paths.manifest_file()).unwrap();
+
+        context.initialize();
+
+        let contents_after = fs::read(repository_paths.manifest_file()).unwrap();
+        let loaded_manifest = manifest_repository.read().unwrap();
+
+        assert_eq!(contents_before, contents_after);
+        assert_eq!(loaded_manifest.manages().len(), 1);
+
+        assert!(context.paths.config_file().is_file());
+        assert!(context.paths.backup_file().is_file());
+    }
+
+    #[test]
+    fn init_rejects_invalid_existing_manifest() {
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
+
+        fs::create_dir_all(repository_paths.metadata_dir()).unwrap();
+
+        fs::write(
+            repository_paths.manifest_file(),
+            "this is not valid TOML = [",
+        )
+        .unwrap();
+
+        let layout = context.layout();
+
+        let result = super::build_plan(&context.paths, &layout, &context.repo_dir);
+
+        assert!(matches!(result, Err(InitError::Manifest(_))));
+
+        assert!(!context.paths.config_file().exists());
+        assert!(!context.paths.backup_file().exists());
+
+        assert!(repository_paths.manifest_file().is_file());
+    }
+
+    #[test]
+    fn init_rollback_preserves_existing_manifest() {
+        use crate::domain::{EntryKind, ManagedEntry, ManagedSource, ManagedTarget};
+
+        let context = TestContext::new();
+        let repository_paths = context.repository_paths();
+
+        fs::create_dir_all(repository_paths.metadata_dir()).unwrap();
+
+        let manifest_repository = ManifestRepository::new(&repository_paths.manifest_file());
+
+        let source = ManagedSource::new(PathBuf::from("nvim/init.lua")).unwrap();
+        let target = ManagedTarget::home_relative(PathBuf::from(".config/nvim/init.lua")).unwrap();
+
+        let mut manifest = ManifestRoot::new();
+        manifest
+            .add(ManagedEntry::new(source, target, EntryKind::File))
+            .unwrap();
+
+        manifest_repository.write(&manifest).unwrap();
+
+        let contents_before = fs::read(repository_paths.manifest_file()).unwrap();
+
+        let mut plan = context.build_plan();
+
+        let missing = context._temp.path().join("nonexistent-file");
+        plan.push(FileSystemAction::RemoveFile(missing).into());
+
+        let result = PlanExecutor::execute(plan);
+
+        assert!(matches!(result, Err(PlanExecutionError::Execution { .. })));
+
+        assert_eq!(
+            fs::read(repository_paths.manifest_file()).unwrap(),
+            contents_before
+        );
+
+        assert_eq!(manifest_repository.read().unwrap().manages().len(), 1);
+
+        assert!(!context.paths.config_file().exists());
+        assert!(!context.paths.backup_file().exists());
+        assert!(!context.paths.backup_dir().exists());
+        assert!(!context.config_dir.exists());
+        assert!(!context.storage_dir.exists());
+
+        assert!(context.repo_dir.is_dir());
+        assert!(repository_paths.metadata_dir().is_dir());
     }
 }
