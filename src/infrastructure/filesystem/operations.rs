@@ -6,10 +6,17 @@ use std::{
 };
 
 pub fn rename(from: &Path, to: &Path) -> Result<(), FileSystemError> {
-    fs::rename(from, to).map_err(|source| FileSystemError::Rename {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        from,
+        rustix::fs::CWD,
+        to,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(|source| FileSystemError::Rename {
         from: from.to_path_buf(),
         to: to.to_path_buf(),
-        source,
+        source: std::io::Error::from(source),
     })
 }
 
@@ -345,7 +352,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::infrastructure::filesystem::atomic_write_file;
+    use crate::infrastructure::filesystem::{atomic_write_file, rename};
 
     use super::{FileSystemError, PathKind, copy_dir, path_kind};
 
@@ -656,5 +663,121 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), b"original");
+    }
+
+    #[test]
+    fn rename_moves_file_when_destination_is_missing() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+
+        fs::write(&source, "content").unwrap();
+
+        rename(&source, &destination).unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "content");
+    }
+
+    #[test]
+    fn rename_rejects_existing_file_destination() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+
+        fs::write(&source, "original source").unwrap();
+        fs::write(&destination, "original destination").unwrap();
+
+        let result = rename(&source, &destination);
+
+        assert!(matches!(
+            result,
+            Err(FileSystemError::Rename {
+                from,
+                to,
+                source: error,
+            }) if from == source
+                && to == destination
+                && error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original source");
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "original destination"
+        );
+    }
+
+    #[test]
+    fn rename_rejects_existing_directory_destination() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+
+        fs::write(source.join("source.txt"), "source content").unwrap();
+        fs::write(destination.join("destination.txt"), "destination content").unwrap();
+
+        let result = rename(&source, &destination);
+
+        assert!(matches!(result, Err(FileSystemError::Rename { .. })));
+
+        assert!(source.is_dir());
+        assert!(destination.is_dir());
+
+        assert_eq!(
+            fs::read_to_string(source.join("source.txt")).unwrap(),
+            "source content"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("destination.txt")).unwrap(),
+            "destination content"
+        );
+    }
+
+    #[test]
+    fn rename_rejects_existing_broken_symlink_destination() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+        let missing_target = temp.path().join("missing.txt");
+
+        fs::write(&source, "source content").unwrap();
+        symlink(&missing_target, &destination).unwrap();
+
+        let result = rename(&source, &destination);
+
+        assert!(matches!(result, Err(FileSystemError::Rename { .. })));
+
+        assert_eq!(fs::read_to_string(&source).unwrap(), "source content");
+
+        assert_eq!(fs::read_link(&destination).unwrap(), missing_target);
+
+        assert_eq!(path_kind(&destination).unwrap(), Some(PathKind::Symlink));
+    }
+
+    #[test]
+    fn rename_preserves_source_when_destination_conflicts() {
+        let temp = tempdir().unwrap();
+
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+
+        fs::write(&source, b"important user data").unwrap();
+        fs::write(&destination, b"existing configuration").unwrap();
+
+        let source_before = fs::read(&source).unwrap();
+        let destination_before = fs::read(&destination).unwrap();
+
+        assert!(rename(&source, &destination).is_err());
+
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(fs::read(&destination).unwrap(), destination_before);
     }
 }

@@ -177,6 +177,7 @@ dependencies = [
  "comfy-table",
  "owo-colors",
  "path-clean",
+ "rustix",
  "serde",
  "tempfile",
  "thiserror",
